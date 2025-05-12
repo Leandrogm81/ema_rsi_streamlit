@@ -18,13 +18,11 @@ st.set_page_config(
 )
 
 # --- Inicialização do Session State ---
-# Guarda valores entre execuções da página
 default_watchlist = ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "AAPL", "MSFT", "GOOGL", "BTC-USD", "ETH-USD"]
 if 'watchlist' not in st.session_state: st.session_state.watchlist = default_watchlist
 if 'backtest_results' not in st.session_state: st.session_state.backtest_results = None
 if 'last_ticker_simulated' not in st.session_state: st.session_state.last_ticker_simulated = ""
 if 'current_signals' not in st.session_state: st.session_state.current_signals = {}
-# Define valores iniciais para os novos parâmetros no state (se não existirem)
 if 'ticker_input_value' not in st.session_state: st.session_state.ticker_input_value = "PETR4.SA"
 if 'cfg_ema_fast' not in st.session_state: st.session_state.cfg_ema_fast = 10
 if 'cfg_ema_slow' not in st.session_state: st.session_state.cfg_ema_slow = 50
@@ -151,53 +149,54 @@ def run_strategy_backtest(ticker: str, start_date: date, end_date: date, initial
     st.caption(f"Backtest '{ticker}' concluído.")
     return results
 
-# --- Função para Plotar o Gráfico (CORRIGIDA) ---
+# --- Função para Plotar o Gráfico (CORRIGIDA - Novamente) ---
 def plot_results(chart_data_df, signals, ticker, indicators_cols, show_indicators=False):
     if chart_data_df.empty: st.warning("Não há dados para plotar."); return go.Figure()
 
-    # Define se teremos 1 ou 2 linhas no subplot
+    # Define especificações do subplot baseado em show_indicators
     rows = 2 if show_indicators else 1
-    row_heights = [0.7, 0.3] if show_indicators else [1.0] # Ajusta altura
-    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=row_heights)
+    row_heights = [0.7, 0.3] if show_indicators else [1.0]
+    specs = [[{}], [{}]] if show_indicators else [[{}]] # Define a estrutura das células
 
-    # Velas (Linha 1)
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.05, row_heights=row_heights, specs=specs)
+
+    # --- Traces da Linha 1 (Preço, EMAs, Sinais) ---
     fig.add_trace(go.Candlestick(x=chart_data_df['Date'], open=chart_data_df['Open'], high=chart_data_df['High'], low=chart_data_df['Low'], close=chart_data_df['Close'], name='OHLC', increasing_line_color='green', decreasing_line_color='red'), row=1, col=1)
-    # EMAs (Linha 1)
     ema_f_col = indicators_cols.get('ema_f'); ema_s_col = indicators_cols.get('ema_s')
     if ema_f_col and ema_s_col:
          fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[ema_f_col], name=ema_f_col.replace('_',' '), line=dict(color='blue', width=1)), row=1, col=1)
          fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[ema_s_col], name=ema_s_col.replace('_',' '), line=dict(color='orange', width=1)), row=1, col=1)
-    # Sinais (Linha 1)
     buy_signals_df = pd.DataFrame([s for s in signals if s['type'] == 'buy']); sell_signals_df = pd.DataFrame([s for s in signals if s['type'] == 'sell'])
     if not buy_signals_df.empty: fig.add_trace(go.Scatter(x=buy_signals_df['date'], y=buy_signals_df['price'], mode='markers', name='Compra', marker=dict(color='green', size=10, symbol='triangle-up', line=dict(width=1, color='DarkSlateGrey'))), row=1, col=1)
     if not sell_signals_df.empty: fig.add_trace(go.Scatter(x=sell_signals_df['date'], y=sell_signals_df['price'], mode='markers', name='Venda', marker=dict(color='red', size=10, symbol='triangle-down', line=dict(width=1, color='DarkSlateGrey'))), row=1, col=1)
 
-    # Plotar RSI (Linha 2) se show_indicators for True
+    # --- Traces da Linha 2 (RSI) - Somente se show_indicators for True ---
     if show_indicators:
         rsi_col = indicators_cols.get('rsi'); rsi_buy_level = st.session_state.cfg_rsi_buy; rsi_sell_level = st.session_state.cfg_rsi_sell
         if rsi_col:
             fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[rsi_col], name=rsi_col.replace('_',' '), line=dict(color='purple', width=1.5)), row=2, col=1)
             fig.add_hline(y=rsi_buy_level, line_dash="dot", line_color="rgba(0,150,0,0.6)", annotation_text=f"RSI Compra > {rsi_buy_level}", annotation_position="bottom right", row=2, col=1)
             fig.add_hline(y=rsi_sell_level, line_dash="dot", line_color="rgba(150,0,0,0.6)", annotation_text=f"RSI Venda < {rsi_sell_level}", annotation_position="top right", row=2, col=1)
-        # Configurações específicas do eixo Y2 (RSI)
+        # Configura o eixo Y2 apenas quando ele existe
         fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, showgrid=True, showline=True, linewidth=1, linecolor='lightgrey', mirror=True)
-        fig.update_xaxes(showticklabels=True, row=2, col=1) # Garante que o eixo X do subplot seja visível
+        fig.update_xaxes(showticklabels=True, row=2, col=1) # Garante labels no eixo X compartilhado
 
-    # Layout Geral
-    fig.update_layout(title={'text': f'Backtest Fast-Trend: {ticker}', 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'}, height=650,
-                      xaxis_rangeslider_visible=False, yaxis_title="Preço / EMA", legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="center", x=0.5),
-                      margin=dict(l=50, r=50, t=80, b=50))
-    # Configurações do eixo X principal (sempre visível)
+    # --- Layout Geral ---
+    fig.update_layout(
+        title={'text': f'Backtest Fast-Trend: {ticker}', 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'},
+        height=650,
+        xaxis_rangeslider_visible=False,
+        yaxis_title="Preço / EMA", # Título do eixo Y da primeira linha
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="center", x=0.5),
+        margin=dict(l=50, r=50, t=80, b=50)
+    )
+    # Configurações dos eixos da primeira linha (sempre existem)
     fig.update_xaxes(showline=True, linewidth=1, linecolor='lightgrey', mirror=True, showticklabels=True, row=1, col=1)
-    # Configurações do eixo Y principal (preço)
     fig.update_yaxes(title_text="Preço / EMA", fixedrange=False, showline=True, linewidth=1, linecolor='lightgrey', mirror=True, row=1, col=1)
 
-    # Remove o espaço do subplot 2 se ele não for usado (melhor abordagem)
-    if not show_indicators:
-         fig.update_layout(xaxis2_visible=False, yaxis2_visible=False)
-
-
     return fig
+
 
 # --- Função para Verificar Sinal Atual (Estratégia Fast-Trend) ---
 @st.cache_data(ttl=900)
@@ -267,11 +266,8 @@ with st.sidebar:
             n_tickers = len(st.session_state.watchlist)
             for i, ticker_chk in enumerate(st.session_state.watchlist):
                 sig = get_current_signal(ticker_chk, st.session_state.cfg_ema_fast, st.session_state.cfg_ema_slow, st.session_state.cfg_rsi_len, st.session_state.cfg_rsi_buy, st.session_state.cfg_rsi_sell)
-                current_signals_temp[ticker_chk] = sig
-                prog_bar.progress((i + 1) / n_tickers, text=f"Verificando {ticker_chk}...")
-                time.sleep(0.05)
-            st.session_state.current_signals = current_signals_temp
-            prog_bar.empty(); st.toast("Verificação concluída!", icon="✅")
+                current_signals_temp[ticker_chk] = sig; prog_bar.progress((i + 1) / n_tickers, text=f"Verificando {ticker_chk}..."); time.sleep(0.05)
+            st.session_state.current_signals = current_signals_temp; prog_bar.empty(); st.toast("Verificação concluída!", icon="✅")
         else: st.toast("Watchlist vazia.", icon="ℹ️")
     if not st.session_state.watchlist: st.info("Nenhum ativo na lista.")
     else:
@@ -283,23 +279,20 @@ with st.sidebar:
             sig_display = f"<span style='color:{sig_color}; font-weight:bold; font-size:small;'>{sig_icon} {signal_stat}</span>" if signal_stat else ""
             col1, col2, col3 = st.columns([0.55, 0.25, 0.2])
             with col1:
-                if st.button(ticker_wl, key=f"sim_{ticker_wl}_{i}", type="secondary", help=f"Carregar {ticker_wl}", use_container_width=True):
-                     st.session_state.ticker_input_value = ticker_wl; st.rerun()
+                if st.button(ticker_wl, key=f"sim_{ticker_wl}_{i}", type="secondary", help=f"Carregar {ticker_wl}", use_container_width=True): st.session_state.ticker_input_value = ticker_wl; st.rerun()
             with col2: st.markdown(sig_display, unsafe_allow_html=True)
             with col3:
                 if st.button("➖", key=f"remove_{ticker_wl}_{i}", type="secondary", help="Remover", use_container_width=True):
-                    removed = st.session_state.watchlist.pop(i); st.session_state.current_signals.pop(removed, None)
-                    st.toast(f"{removed} removido.");
+                    removed = st.session_state.watchlist.pop(i); st.session_state.current_signals.pop(removed, None); st.toast(f"{removed} removido.");
                     if st.session_state.get('last_ticker_simulated') == removed: st.session_state['backtest_results'] = None; st.session_state['last_ticker_simulated'] = ""
                     st.rerun()
     if st.session_state.watchlist: st.markdown("<a href='?clear_watchlist=true' target='_self' style='color: tomato; font-size: small;'>Limpar Lista Completa</a>", unsafe_allow_html=True)
 
 # Lógica para limpar watchlist
 if st.query_params.get("clear_watchlist") == "true":
-    st.session_state.watchlist = []; st.session_state.current_signals = {}
-    st.session_state['backtest_results'] = None; st.session_state['last_ticker_simulated'] = ""
-    st.session_state['scan_results_df'] = pd.DataFrame(); st.toast("Lista e resultados limpos.")
-    st.query_params.clear(); st.rerun()
+    st.session_state.watchlist = []; st.session_state.current_signals = {}; st.session_state['backtest_results'] = None
+    st.session_state['last_ticker_simulated'] = ""; st.session_state['scan_results_df'] = pd.DataFrame()
+    st.toast("Lista e resultados limpos."); st.query_params.clear(); st.rerun()
 
 # ==============================================================================
 # --- Abas para Organizar a Interface ---
@@ -340,12 +333,8 @@ with tab1:
         with st.container(border=True):
             st.subheader("📊 Métricas de Desempenho"); metrics_sim = results_sim['metrics']
             m_col1, m_col2, m_col3 = st.columns(3); m_col4, m_col5, m_col6 = st.columns(3)
-            m_col1.metric("CAGR (Anualizado)", f"{metrics_sim['cagr']:.2f}%")
-            m_col2.metric("Retorno Total", f"{metrics_sim['totalReturnPercent']:.2f}%")
-            m_col3.metric("Nº Trades", metrics_sim['numberOfTrades'])
-            m_col4.metric("Taxa de Acerto", f"{metrics_sim['winRate']:.2f}%")
-            m_col5.metric("Payoff Ratio", f"{metrics_sim['payoffRatio']:.2f}")
-            m_col6.metric("Max Drawdown", f"{metrics_sim['maxDrawdown']:.2f}%")
+            m_col1.metric("CAGR (Anualizado)", f"{metrics_sim['cagr']:.2f}%"); m_col2.metric("Retorno Total", f"{metrics_sim['totalReturnPercent']:.2f}%"); m_col3.metric("Nº Trades", metrics_sim['numberOfTrades'])
+            m_col4.metric("Taxa de Acerto", f"{metrics_sim['winRate']:.2f}%"); m_col5.metric("Payoff Ratio", f"{metrics_sim['payoffRatio']:.2f}"); m_col6.metric("Max Drawdown", f"{metrics_sim['maxDrawdown']:.2f}%")
             st.caption(f"Período: {metrics_sim['startDate']} a {metrics_sim['endDate']} | Capital: {format_currency(metrics_sim['initialCapital'])} -> {format_currency(metrics_sim['finalEquity'])} ({format_currency(metrics_sim['totalProfit'])}) | Sharpe: {metrics_sim['sharpeRatio']:.2f}")
             st.divider()
             st.subheader("📈 Gráfico e Operações")
@@ -355,9 +344,7 @@ with tab1:
             with st.expander("📜 Ver Histórico de Operações Detalhado"):
                 trades_df_sim = results_sim['trades']
                 if not trades_df_sim.empty:
-                    trades_df_display_sim = trades_df_sim.copy(); trades_df_display_sim['profit'] = trades_df_display_sim['profit'].apply(format_currency)
-                    trades_df_display_sim['entryPrice'] = trades_df_display_sim['entryPrice'].map('{:.2f}'.format); trades_df_display_sim['exitPrice'] = trades_df_display_sim['exitPrice'].map('{:.2f}'.format)
-                    trades_df_display_sim['returnPercent'] = trades_df_display_sim['returnPercent'].map('{:.2f}%'.format)
+                    trades_df_display_sim = trades_df_sim.copy(); trades_df_display_sim['profit'] = trades_df_display_sim['profit'].apply(format_currency); trades_df_display_sim['entryPrice'] = trades_df_display_sim['entryPrice'].map('{:.2f}'.format); trades_df_display_sim['exitPrice'] = trades_df_display_sim['exitPrice'].map('{:.2f}'.format); trades_df_display_sim['returnPercent'] = trades_df_display_sim['returnPercent'].map('{:.2f}%'.format)
                     st.dataframe(trades_df_display_sim[['entryDate', 'entryPrice', 'exitDate', 'exitPrice', 'daysHeld', 'profit', 'returnPercent', 'exitReason']], use_container_width=True)
                 else: st.info("Nenhuma operação realizada.")
     elif simulate_button and st.session_state['backtest_results'] is None: st.warning("Não foi possível gerar resultados. Verifique ticker/período/erros.")
@@ -369,11 +356,9 @@ with tab2:
     st.warning("Scanner pode demorar. Listas maiores podem falhar no Streamlit Cloud.", icon="⚠️")
     scan_col1, scan_col2 = st.columns([0.6, 0.4])
     with scan_col1:
-        scan_list_options = ["Use Minha Watchlist Atual"] + list(COMMON_TICKERS.keys())
-        selected_scan_list_name = st.radio("Lista para escanear:", options=scan_list_options, key="scan_list_radio_tab2", horizontal=True)
+        scan_list_options = ["Use Minha Watchlist Atual"] + list(COMMON_TICKERS.keys()); selected_scan_list_name = st.radio("Lista para escanear:", options=scan_list_options, key="scan_list_radio_tab2", horizontal=True)
     with scan_col2:
-        min_cagr_scan = st.number_input("CAGR Mínimo Desejado (%)", min_value=0.0, value=st.session_state.min_cagr_input, step=5.0, format="%.1f", key="min_cagr_input_tab2")
-        st.session_state.min_cagr_input = min_cagr_scan
+        min_cagr_scan = st.number_input("CAGR Mínimo Desejado (%)", min_value=0.0, value=st.session_state.min_cagr_input, step=5.0, format="%.1f", key="min_cagr_input_tab2"); st.session_state.min_cagr_input = min_cagr_scan
     list_is_empty = True; tickers_for_scan = []
     if selected_scan_list_name == "Use Minha Watchlist Atual": tickers_for_scan = st.session_state.watchlist; list_is_empty = not tickers_for_scan;
     else: tickers_for_scan = COMMON_TICKERS[selected_scan_list_name]; list_is_empty = False
@@ -391,8 +376,7 @@ with tab2:
                 res_scan = run_strategy_backtest(ticker=ticker_scan, **params_scan)
                 if res_scan and res_scan.get('metrics'):
                     cagr_val_scan = res_scan['metrics'].get('cagr', -999)
-                    if cagr_val_scan > min_cagr_threshold_scan:
-                        profitable_list.append({'Ticker': ticker_scan, 'CAGR (%)': cagr_val_scan, 'Retorno Total (%)': res_scan['metrics']['totalReturnPercent'], 'Nº Trades': res_scan['metrics']['numberOfTrades'], 'Taxa Acerto (%)': res_scan['metrics']['winRate'], 'Max Drawdown (%)': res_scan['metrics']['maxDrawdown']})
+                    if cagr_val_scan > min_cagr_threshold_scan: profitable_list.append({'Ticker': ticker_scan, 'CAGR (%)': cagr_val_scan, 'Retorno Total (%)': res_scan['metrics']['totalReturnPercent'], 'Nº Trades': res_scan['metrics']['numberOfTrades'], 'Taxa Acerto (%)': res_scan['metrics']['winRate'], 'Max Drawdown (%)': res_scan['metrics']['maxDrawdown']})
             except Exception as e_scan: error_msg_scan = f"Erro {ticker_scan}: {str(e_scan)[:100]}..."; error_messages.append(error_msg_scan); skipped_count += 1
             # time.sleep(0.05)
         scan_progress.empty(); st.subheader("Resultados do Escaneamento")
@@ -402,12 +386,11 @@ with tab2:
                  if col_scan in profit_df_scan.columns: profit_df_scan[col_scan] = profit_df_scan[col_scan].map('{:.2f}%'.format)
             st.session_state['scan_results_df'] = profit_df_scan
             st.success(f"Scan concluído! {len(profit_df_scan)} ativos com CAGR > {min_cagr_threshold_scan}%.");
-            if skipped_count > 0: st.warning(f"{skipped_count} ativos pulados devido a erros.")
+            if skipped_count > 0: st.warning(f"{skipped_count} ativos pulados.")
             st.dataframe(profit_df_scan, use_container_width=True, height=min( (len(profit_df_scan) + 1) * 35 + 3, 600) )
             profit_tickers_scan = profit_df_scan['Ticker'].tolist(); missing_wl_scan = [t for t in profit_tickers_scan if t not in st.session_state.watchlist]
             if missing_wl_scan:
-                if st.button(f"⭐ Adicionar {len(missing_wl_scan)} resultados à Watchlist", key="add_scan_results"):
-                     st.session_state.watchlist.extend(missing_wl_scan); st.session_state.watchlist = sorted(list(set(st.session_state.watchlist))); st.toast(f"{len(missing_wl_scan)} adicionados!"); st.rerun()
+                if st.button(f"⭐ Adicionar {len(missing_wl_scan)} resultados à Watchlist", key="add_scan_results"): st.session_state.watchlist.extend(missing_wl_scan); st.session_state.watchlist = sorted(list(set(st.session_state.watchlist))); st.toast(f"{len(missing_wl_scan)} adicionados!"); st.rerun()
             if error_messages:
                 with st.expander("Ver detalhes dos erros"): [st.caption(msg) for msg in error_messages]
         else:
