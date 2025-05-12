@@ -30,7 +30,7 @@ if 'cfg_atr_mult' not in st.session_state: st.session_state.cfg_atr_mult = 2.0
 if 'cfg_start' not in st.session_state: st.session_state.cfg_start = date.today() - timedelta(days=5*365)
 if 'cfg_end' not in st.session_state: st.session_state.cfg_end = date.today()
 if 'cfg_capital' not in st.session_state: st.session_state.cfg_capital = 1000.0
-if 'min_cagr_input' not in st.session_state: st.session_state.min_cagr_input = 30.0
+if 'min_cagr_input' not in st.session_state: st.session_state.min_cagr_input = 5.0
 if 'scan_results_df' not in st.session_state: st.session_state.scan_results_df = pd.DataFrame()
 
 # --- Lista de Tickers Comuns ---
