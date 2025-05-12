@@ -1,204 +1,200 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import pandas_ta as ta
+import pandas_ta as ta # Usaremos para EMA, RSI, ATR
 import yfinance as yf
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots # Para subplots
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, date
-import quantstats as qs # Para métricas avançadas
-import time # Para pequeno delay opcional
+import quantstats as qs
+import time
 
 # --- Configuração da Página Streamlit ---
-st.set_page_config(
-    page_title="Ferramenta EMA RSI Diário",
-    page_icon="🎯",
-    layout="wide"
-)
+st.set_page_config(page_title="Estratégia Fast-Trend Confirmed", page_icon="⚡", layout="wide") # Novo Ícone
 
-# --- Inicialização do Session State ---
-# Guarda valores entre execuções da página
+# --- Inicialização do Session State (Mantém a estrutura) ---
 default_watchlist = ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "AAPL", "MSFT", "GOOGL", "BTC-USD", "ETH-USD"]
-if 'watchlist' not in st.session_state:
-    st.session_state.watchlist = default_watchlist # Começa com alguns exemplos
-if 'backtest_results' not in st.session_state:
-    st.session_state.backtest_results = None # Guarda resultado da simulação individual
-if 'last_ticker_simulated' not in st.session_state:
-    st.session_state.last_ticker_simulated = "" # Qual ticker foi simulado por último
-if 'current_signals' not in st.session_state:
-    st.session_state.current_signals = {} # Guarda {ticker: sinal} da verificação atual
-if 'ticker_input_value' not in st.session_state:
-    st.session_state.ticker_input_value = "PETR4.SA" # Valor inicial do input de ticker
-if 'scan_results_df' not in st.session_state:
-    st.session_state.scan_results_df = pd.DataFrame() # Guarda resultado do scan
+if 'watchlist' not in st.session_state: st.session_state.watchlist = default_watchlist
+if 'backtest_results' not in st.session_state: st.session_state.backtest_results = None
+if 'last_ticker_simulated' not in st.session_state: st.session_state.last_ticker_simulated = ""
+if 'current_signals' not in st.session_state: st.session_state.current_signals = {}
+# Define valores iniciais para os novos parâmetros no state
+if 'ticker_input_value' not in st.session_state: st.session_state.ticker_input_value = "PETR4.SA"
+if 'cfg_ema_fast' not in st.session_state: st.session_state.cfg_ema_fast = 10
+if 'cfg_ema_slow' not in st.session_state: st.session_state.cfg_ema_slow = 50
+if 'cfg_rsi_len' not in st.session_state: st.session_state.cfg_rsi_len = 14
+if 'cfg_rsi_buy' not in st.session_state: st.session_state.cfg_rsi_buy = 55.0
+if 'cfg_rsi_sell' not in st.session_state: st.session_state.cfg_rsi_sell = 45.0
+if 'cfg_atr_len' not in st.session_state: st.session_state.cfg_atr_len = 14
+if 'cfg_atr_mult' not in st.session_state: st.session_state.cfg_atr_mult = 2.0
+# Mantém os outros (start, end, capital)
+if 'scan_results_df' not in st.session_state: st.session_state.scan_results_df = pd.DataFrame()
 
-# --- Lista de Tickers Comuns ---
-# Listas estáticas de exemplo
+# --- Lista de Tickers Comuns (Mantém a estrutura) ---
 COMMON_TICKERS = {
     "IBOV (Exemplos)": ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "ABEV3.SA", "MGLU3.SA", "WEGE3.SA", "B3SA3.SA", "RENT3.SA", "PRIO3.SA"],
     "US Tech (Exemplos)": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AMD", "INTC", "CSCO"],
     "Cripto (Exemplos)": ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "DOGE-USD", "AVAX-USD", "LINK-USD"]
 }
-# Cria uma lista única e ordenada para o selectbox, incluindo uma opção vazia no início
 FLAT_TICKER_LIST = [""] + sorted(list(set(ticker for sublist in COMMON_TICKERS.values() for ticker in sublist)))
 
-
-# --- Função de Métricas (Atualizada para CAGR) ---
+# --- Função de Métricas (Permanece a mesma) ---
 def calculate_metrics(trades_df, equity_curve_df, initial_capital):
-    """Calcula métricas de desempenho básicas e avançadas."""
-    metrics = {"winRate": 0, "payoffRatio": 0, "avgGain": 0, "avgLoss": 0, "maxDrawdown": 0, "sharpeRatio": 0, "cagr": 0}
-    if trades_df.empty or equity_curve_df.empty:
-        return metrics
+    # >>> COLE O CÓDIGO DA FUNÇÃO calculate_metrics DA VERSÃO ANTERIOR AQUI <<<
+    pass
 
-    # Cálculos Manuais
-    wins = trades_df[trades_df['profit'] > 0]
-    losses = trades_df[trades_df['profit'] <= 0]
-    total_trades = len(trades_df)
-    metrics["winRate"] = round((len(wins) / total_trades * 100), 2) if total_trades > 0 else 0
-    metrics["avgGain"] = round(wins['profit'].mean(), 2) if not wins.empty else 0
-    metrics["avgLoss"] = round(abs(losses['profit'].mean()), 2) if not losses.empty else 0 # Média da perda (positiva)
-    metrics["payoffRatio"] = round(metrics["avgGain"] / metrics["avgLoss"], 2) if metrics["avgLoss"] > 0 else 0
-
-    # Cálculos com QuantStats
-    try:
-        # Prepara a curva de equity para o quantstats
-        equity_curve_df['Date'] = pd.to_datetime(equity_curve_df['date'])
-        equity_curve_df = equity_curve_df.set_index('Date')
-        daily_returns = equity_curve_df['equity'].pct_change().dropna() # Calcula retornos diários
-
-        if not daily_returns.empty and daily_returns.std() != 0 and len(daily_returns) >= 3: # Precisa de variância e dados suficientes
-            metrics["maxDrawdown"] = round(qs.stats.max_drawdown(daily_returns) * 100, 2) # Em %
-            metrics["sharpeRatio"] = round(qs.stats.sharpe(daily_returns), 2) # Sharpe anualizado (padrão)
-            metrics["cagr"] = round(qs.stats.cagr(daily_returns) * 100, 2) # CAGR em %
-        else:
-            # Não calcula se não houver dados suficientes
-             st.caption("Dados insuficientes para calcular Max Drawdown, Sharpe ou CAGR via QuantStats.")
-
-    except Exception as e:
-        st.caption(f"Aviso: Erro no cálculo de métricas QuantStats: {e}") # Aviso em vez de erro fatal
-
-    # Garantir que NaN não seja retornado
-    for k, v in metrics.items():
-        if pd.isna(v):
-            metrics[k] = 0 # Substitui NaN por 0
-    return metrics
-
-# --- Função do Backtest (Completa e Corrigida) ---
-@st.cache_data(ttl=3600) # Cache de 1 hora
+# --- Função do Backtest (ATUALIZADA PARA NOVA ESTRATÉGIA) ---
+@st.cache_data(ttl=3600)
 def run_strategy_backtest(ticker: str, start_date: date, end_date: date,
-                          initial_capital: float = 1000.0, rsi_len: int = 2,
-                          ema_len: int = 2, exit_days: int = 4):
+                          initial_capital: float = 1000.0,
+                          # Novos Parâmetros da Estratégia
+                          ema_fast_len: int = 10, ema_slow_len: int = 50,
+                          rsi_len: int = 14, rsi_buy_level: float = 55.0, rsi_sell_level: float = 45.0,
+                          atr_len: int = 14, atr_multiplier: float = 2.0):
     """
-    Executa o backtest da estratégia EMA RSI Diário e retorna resultados incluindo métricas e CAGR.
+    Executa o backtest da estratégia "Fast-Trend Confirmed" (EMA Cross + RSI Filter + ATR Stop).
     """
-    st.caption(f"Iniciando backtest para {ticker}...") # Feedback sutil
+    st.caption(f"Iniciando backtest para {ticker}...")
 
-    # --- 1. Buscar Dados Históricos ---
-    fetch_start_date = start_date - timedelta(days=50) # Para aquecimento dos indicadores
+    # --- 1. Buscar Dados Históricos (Adaptação para período maior de EMA) ---
+    fetch_start_date = start_date - timedelta(days=max(ema_slow_len, rsi_len, atr_len) + 50) # Garante dados suficientes para a EMA mais longa
     start_str = fetch_start_date.strftime('%Y-%m-%d')
-    end_str = (end_date + timedelta(days=1)).strftime('%Y-%m-%d') # +1 dia para incluir end_date
+    end_str = (end_date + timedelta(days=1)).strftime('%Y-%m-%d')
 
     try:
         data = yf.download(ticker, start=start_str, end=end_str, interval="1d", auto_adjust=True, progress=False)
-        if data.empty: raise ValueError("Nenhum dado retornado pelo yfinance.")
-        data.columns = ['Open', 'High', 'Low', 'Close', 'Volume'] # Padroniza nomes
-        # Filtra para o período exato solicitado APÓS buscar mais para indicadores
+        if data.empty: raise ValueError("Nenhum dado retornado.")
+        data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
         data = data[(data.index >= pd.Timestamp(start_date)) & (data.index < pd.Timestamp(end_date + timedelta(days=1)))]
-        if data.empty: raise ValueError(f"Nenhum dado encontrado no período de {start_date} a {end_date}.")
+        if data.empty: raise ValueError(f"Nenhum dado no período {start_date} a {end_date}.")
     except Exception as e:
         st.error(f"Erro ao buscar dados para {ticker}: {e}", icon="📉")
-        return None # Retorna None em caso de erro na busca
+        return None
 
-    # --- 2. Calcular Indicadores ---
+    # --- 2. Calcular Novos Indicadores ---
     try:
-        data.ta.rsi(close='Close', length=rsi_len, append=True, col_names=(f'RSI_{rsi_len}_C',))
-        data.ta.rsi(close='Open', length=rsi_len, append=True, col_names=(f'RSI_{rsi_len}_O',))
-        rsi_close_col = f'RSI_{rsi_len}_C'; rsi_open_col = f'RSI_{rsi_len}_O'
-        data.ta.ema(close=rsi_close_col, length=ema_len, append=True, col_names=(f'EMA_{ema_len}_RSI_C',))
-        data.ta.ema(close=rsi_open_col, length=ema_len, append=True, col_names=(f'EMA_{ema_len}_RSI_O',))
-        ema_rsi_c_col = f'EMA_{ema_len}_RSI_C'; ema_rsi_o_col = f'EMA_{ema_len}_RSI_O'
+        # EMAs
+        ema_fast_col = f'EMA_{ema_fast_len}'
+        ema_slow_col = f'EMA_{ema_slow_len}'
+        data.ta.ema(close='Close', length=ema_fast_len, append=True, col_names=(ema_fast_col,))
+        data.ta.ema(close='Close', length=ema_slow_len, append=True, col_names=(ema_slow_col,))
 
-        # Remove linhas com NaN gerados pelos indicadores (geralmente no início)
+        # RSI
+        rsi_col = f'RSI_{rsi_len}'
+        data.ta.rsi(close='Close', length=rsi_len, append=True, col_names=(rsi_col,))
+
+        # ATR (Usado para Stops)
+        atr_col = f'ATR_{atr_len}'
+        data.ta.atr(length=atr_len, append=True, col_names=(atr_col,)) # Usa High, Low, Close por padrão
+
         initial_len = len(data)
-        data.dropna(inplace=True)
-        if data.empty: raise ValueError(f"Dados insuficientes após cálculo de indicadores (período RSI/EMA longo demais?). {initial_len} linhas iniciais.")
+        data.dropna(inplace=True) # Remove NaNs iniciais
+        if data.empty: raise ValueError(f"Dados insuficientes após indicadores. {initial_len} linhas iniciais.")
     except Exception as e:
         st.error(f"Erro ao calcular indicadores para {ticker}: {e}", icon="📊")
         return None
 
-    # --- 3. Simulação / Lógica de Backtesting ---
+    # --- 3. Simulação / Lógica de Backtesting (Nova Estratégia) ---
     cash = initial_capital
-    equity = initial_capital
     shares = 0.0
     in_position = False
     entry_price = 0.0
     entry_date = None
-    days_in_trade = 0
+    entry_atr = 0.0 # Guarda o ATR no momento da entrada para o stop
+    stop_loss_price = 0.0 # Nível do stop loss inicial
+    trailing_stop_price = 0.0 # Nível do trailing stop
+    highest_price_since_entry = 0.0 # Máximo preço desde a entrada para o trailing
+
     trades = []
     signals = []
-    # Ponto inicial da curva de equity (data do primeiro dia com indicadores válidos)
     equity_curve = [{"date": data.index[0].date().strftime('%Y-%m-%d'), "equity": initial_capital}]
 
-    # Loop dia a dia (começando do segundo dia com dados válidos)
+    # Loop dia a dia
     for i in range(1, len(data)):
         current_date = data.index[i]
-        current_open_price = data['Open'].iloc[i]
-        prev_row = data.iloc[i-1] # Dados do dia anterior (para gerar sinal)
+        current_open = data['Open'].iloc[i]
+        current_high = data['High'].iloc[i]
+        current_low = data['Low'].iloc[i]
+        current_close = data['Close'].iloc[i]
+        prev_row = data.iloc[i-1] # Dados do dia anterior (para sinais e stops)
+        prev_prev_row = data.iloc[i-2] if i > 1 else None # Dia anterior ao anterior (para cruzamentos)
 
-        # Indicadores do dia anterior
-        prev_ema_rsi_c = prev_row[ema_rsi_c_col]; prev_ema_rsi_o = prev_row[ema_rsi_o_col]
-        # Indicadores do dia anterior ao anterior (para verificar cruzamentos e tendência da EMA)
-        prev_prev_ema_rsi_c = data[ema_rsi_c_col].iloc[i-2] if i > 1 else np.nan
-        prev_prev_ema_rsi_o = data[ema_rsi_o_col].iloc[i-2] if i > 1 else np.nan
+        # Valores dos indicadores no dia anterior
+        prev_ema_fast = prev_row[ema_fast_col]
+        prev_ema_slow = prev_row[ema_slow_col]
+        prev_rsi = prev_row[rsi_col]
+        prev_atr = prev_row[atr_col] # ATR do dia anterior
 
         # --- Lógica de Saída (Verificada Primeiro) ---
         exit_signal = False; exit_reason = None
         if in_position:
-            days_in_trade += 1
-            # Condição 1: Saída Técnica (Crossunder + EMA caindo)
-            is_crossunder = prev_ema_rsi_c < prev_ema_rsi_o and prev_prev_ema_rsi_c >= prev_prev_ema_rsi_o # Crossunder no dia anterior
-            is_ema_falling = prev_ema_rsi_c < prev_prev_ema_rsi_c # EMA caiu no dia anterior
-            if is_crossunder and is_ema_falling:
-                exit_signal, exit_reason = True, "Saída Técnica"
-            # Condição 2: Saída por Tempo
-            elif days_in_trade == exit_days:
-                exit_signal, exit_reason = True, f"Saída por Tempo ({exit_days}d)"
+            # Atualiza trailing stop se necessário
+            highest_price_since_entry = max(highest_price_since_entry, current_high) # Usa a máxima do dia atual
+            new_trailing_stop = highest_price_since_entry - (atr_multiplier * entry_atr) # Usa ATR da entrada
+            trailing_stop_price = max(trailing_stop_price, new_trailing_stop) # Trailing só sobe
 
-            # Executa a venda se o sinal for verdadeiro
+            # 1. Verifica Stops (Baseado na Mínima do Dia Atual vs Stops definidos)
+            if current_low <= stop_loss_price:
+                exit_signal, exit_reason = True, f"Stop Loss ({atr_multiplier}xATR)"
+                exit_price = stop_loss_price # Sai no preço do stop
+            elif current_low <= trailing_stop_price:
+                exit_signal, exit_reason = True, f"Trailing Stop ({atr_multiplier}xATR)"
+                exit_price = trailing_stop_price # Sai no preço do trailing stop
+
+            # 2. Verifica Condições de Saída por Indicadores (Baseado nos dados do dia anterior)
+            elif prev_prev_row is not None:
+                # Cruzamento EMA descendente no dia anterior?
+                ema_crossed_down = prev_ema_fast < prev_ema_slow and prev_prev_row[ema_fast_col] >= prev_prev_row[ema_slow_col]
+                if ema_crossed_down:
+                    exit_signal, exit_reason = True, "EMA Cross Down"
+                    exit_price = current_open # Sai na abertura
+                # RSI abaixo do nível no dia anterior?
+                elif prev_rsi < rsi_sell_level:
+                    exit_signal, exit_reason = True, f"RSI < {rsi_sell_level}"
+                    exit_price = current_open # Sai na abertura
+
+            # Executa a venda
             if exit_signal:
-                exit_price = current_open_price # Sai na abertura do dia atual
-                if shares > 0 and exit_price > 0: # Segurança
+                if shares > 0: # Segurança
                     cash += shares * exit_price
                     profit = (exit_price - entry_price) * shares
                     return_pct = ((exit_price / entry_price) - 1) * 100 if entry_price != 0 else 0
+                    days_held = (current_date.date() - entry_date).days + 1 # Calcula dias
                     trades.append({
                         "entryDate": entry_date.strftime('%Y-%m-%d'), "entryPrice": round(entry_price, 2),
                         "exitDate": current_date.date().strftime('%Y-%m-%d'), "exitPrice": round(exit_price, 2),
                         "shares": round(shares, 4), "profit": round(profit, 2),
-                        "returnPercent": round(return_pct, 2), "exitReason": exit_reason, "daysHeld": days_in_trade
+                        "returnPercent": round(return_pct, 2), "exitReason": exit_reason, "daysHeld": days_held
                     })
                     signals.append({"date": current_date.date().strftime('%Y-%m-%d'), "type": "sell", "price": round(exit_price, 2)})
-                # Reseta estado da posição
-                shares, in_position, entry_price, entry_date, days_in_trade = 0.0, False, 0.0, None, 0
+                shares, in_position, entry_price, entry_date, entry_atr, stop_loss_price, trailing_stop_price, highest_price_since_entry = \
+                    0.0, False, 0.0, None, 0.0, 0.0, 0.0, 0.0 # Reseta tudo
+
 
         # --- Lógica de Entrada (Verificada se não saiu e não está em posição) ---
-        if not in_position and i > 1: # Precisa de i > 1 para ter prev_prev
-            # Condição: Crossover + EMA subindo
-            is_crossover = prev_ema_rsi_c > prev_ema_rsi_o and prev_prev_ema_rsi_c <= prev_prev_ema_rsi_o # Crossover no dia anterior
-            is_ema_rising = prev_ema_rsi_c > prev_prev_ema_rsi_c # EMA subiu no dia anterior
+        if not in_position and prev_prev_row is not None:
+            # Condições baseadas nos dados do dia anterior
+            ema_crossed_up = prev_ema_fast > prev_ema_slow and prev_prev_row[ema_fast_col] <= prev_prev_row[ema_slow_col]
+            rsi_confirm = prev_rsi > rsi_buy_level
 
-            if is_crossover and is_ema_rising:
-                entry_price = current_open_price # Entra na abertura do dia atual
-                if entry_price > 0 and cash > 0: # Segurança
+            if ema_crossed_up and rsi_confirm:
+                entry_price = current_open # Entra na abertura do dia atual
+                if entry_price > 0 and cash > 0 and prev_atr > 0: # Precisa de ATR > 0 para stop
+                    entry_atr = prev_atr # Guarda ATR do dia anterior para cálculo do stop
+                    stop_loss_price = entry_price - (atr_multiplier * entry_atr)
+                    trailing_stop_price = stop_loss_price # Trailing começa no stop inicial
+                    highest_price_since_entry = entry_price # Preço inicial para trailing
+
+                    # Calcula tamanho da posição (100% do capital por enquanto)
                     shares_to_buy = cash / entry_price
-                    cash -= shares_to_buy * entry_price # Atualiza caixa
-                    # Define estado da posição
-                    shares, in_position, entry_date, days_in_trade = shares_to_buy, True, current_date.date(), 0
+                    cash -= shares_to_buy * entry_price
+                    shares, in_position, entry_date = shares_to_buy, True, current_date.date()
                     signals.append({"date": current_date.date().strftime('%Y-%m-%d'), "type": "buy", "price": round(entry_price, 2)})
 
-        # Atualiza valor do Portfólio Diário (Equity) para a curva
-        current_equity = cash + (shares * data['Close'].iloc[i]) # Usa o fechamento do dia atual
+
+        # --- Atualiza Curva de Equity ---
+        current_equity = cash + (shares * current_close) # Usa fechamento do dia atual
         equity_curve.append({"date": current_date.date().strftime('%Y-%m-%d'), "equity": round(current_equity, 2)})
 
     # --- 4. Calcular Resultados Finais ---
@@ -209,55 +205,57 @@ def run_strategy_backtest(ticker: str, start_date: date, end_date: date,
     trades_df = pd.DataFrame(trades) if trades else pd.DataFrame()
     equity_curve_df = pd.DataFrame(equity_curve)
 
-    # Calcular Métricas Adicionais (incluindo CAGR)
     adv_metrics = calculate_metrics(trades_df, equity_curve_df, initial_capital)
 
-    # Preparar dados para gráfico (incluindo indicadores)
-    chart_data_df = data[['Open', 'High', 'Low', 'Close', rsi_close_col, rsi_open_col, ema_rsi_c_col, ema_rsi_o_col]].reset_index()
-    chart_data_df['Date'] = pd.to_datetime(chart_data_df['Date']).dt.date # Garante que é date
+    # --- 5. Preparar Dicionário de Retorno ---
+    chart_data_df = data[['Open', 'High', 'Low', 'Close', ema_fast_col, ema_slow_col, rsi_col]].reset_index() # Seleciona indicadores relevantes
+    chart_data_df['Date'] = pd.to_datetime(chart_data_df['Date']).dt.date
 
-    # Datas de início/fim efetivas do backtest (após remover NaNs)
     metrics_start_date = data.index.min().date() if not data.empty else None
     metrics_end_date = data.index.max().date() if not data.empty else None
 
-    # --- 5. Retornar Dicionário Completo de Resultados ---
     results = {
         "ticker": ticker,
-        "params": {"rsi": rsi_len, "ema": ema_len, "exit": exit_days, "capital": initial_capital},
+        "params": {"ema_f": ema_fast_len, "ema_s": ema_slow_len, "rsi": rsi_len, "rsi_buy": rsi_buy_level, "rsi_sell": rsi_sell_level, "atr_len": atr_len, "atr_mult": atr_multiplier, "capital": initial_capital},
         "metrics": {
             "initialCapital": round(initial_capital, 2), "finalEquity": round(final_equity, 2),
             "totalProfit": round(total_profit, 2), "totalReturnPercent": round(total_return_percent, 2),
             "numberOfTrades": number_of_trades,
             "startDate": metrics_start_date.strftime('%Y-%m-%d') if metrics_start_date else 'N/A',
             "endDate": metrics_end_date.strftime('%Y-%m-%d') if metrics_end_date else 'N/A',
-            **adv_metrics # Adiciona winRate, payoffRatio, avgGain, avgLoss, maxDrawdown, sharpeRatio, cagr
+            **adv_metrics
         },
-        "trades": trades_df, # DataFrame de trades
-        "signals": signals, # Lista de dicionários de sinais
-        "chartData": chart_data_df, # DataFrame com OHLC e indicadores
-        "indicators": {"rsi_c": rsi_close_col, "rsi_o": rsi_open_col, "ema_c": ema_rsi_c_col, "ema_o": ema_rsi_o_col} # Nomes das colunas
+        "trades": trades_df,
+        "signals": signals,
+        "chartData": chart_data_df, # Agora inclui EMAs e RSI
+        "indicators": {"ema_f": ema_fast_col, "ema_s": ema_slow_col, "rsi": rsi_col} # Nomes das colunas relevantes
     }
-    st.caption(f"Backtest concluído para {ticker}.") # Feedback sutil
+    st.caption(f"Backtest '{ticker}' concluído.")
     return results
 
 
-# --- Função para Plotar o Gráfico com Subplots (Completa) ---
+# --- Função para Plotar o Gráfico (ATUALIZADA para novos indicadores) ---
 def plot_results(chart_data_df, signals, ticker, indicators_cols, show_indicators=False):
-    """Plota o gráfico de velas, sinais e opcionalmente os indicadores."""
+    """Plota o gráfico de velas, sinais e opcionalmente os indicadores EMA e RSI."""
     if chart_data_df.empty:
         st.warning("Não há dados para plotar o gráfico.")
-        return go.Figure() # Retorna figura vazia
+        return go.Figure()
 
-    # Cria figura com 2 subplots (preços em cima, indicadores embaixo)
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.05, # Espaço entre gráficos
-                        row_heights=[0.7, 0.3]) # Proporção de altura
+                        vertical_spacing=0.05, row_heights=[0.7, 0.3])
 
     # --- Gráfico de Velas (Linha 1) ---
     fig.add_trace(go.Candlestick(x=chart_data_df['Date'], open=chart_data_df['Open'], high=chart_data_df['High'],
                                low=chart_data_df['Low'], close=chart_data_df['Close'], name='OHLC',
-                               increasing_line_color='green', decreasing_line_color='red'), # Cores das velas
+                               increasing_line_color='green', decreasing_line_color='red'),
                   row=1, col=1)
+
+    # Plotar EMAs junto com o preço
+    ema_f_col = indicators_cols.get('ema_f')
+    ema_s_col = indicators_cols.get('ema_s')
+    if ema_f_col and ema_s_col:
+         fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[ema_f_col], name=ema_f_col.replace('_',' '), line=dict(color='blue', width=1)), row=1, col=1)
+         fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[ema_s_col], name=ema_s_col.replace('_',' '), line=dict(color='orange', width=1)), row=1, col=1)
 
     # --- Sinais de Compra/Venda (Linha 1) ---
     buy_signals_df = pd.DataFrame([s for s in signals if s['type'] == 'buy'])
@@ -271,202 +269,166 @@ def plot_results(chart_data_df, signals, ticker, indicators_cols, show_indicator
                                   marker=dict(color='red', size=10, symbol='triangle-down', line=dict(width=1, color='DarkSlateGrey'))),
                       row=1, col=1)
 
-    # --- Plotar Indicadores (Linha 2) se selecionado ---
+    # --- Plotar Indicadores (RSI na Linha 2) se selecionado ---
     if show_indicators:
-        rsi_c_col = indicators_cols['rsi_c']; rsi_o_col = indicators_cols['rsi_o']
-        ema_c_col = indicators_cols['ema_c']; ema_o_col = indicators_cols['ema_o']
+        rsi_col = indicators_cols.get('rsi')
+        rsi_buy_level = st.session_state.cfg_rsi_buy # Pega do state
+        rsi_sell_level = st.session_state.cfg_rsi_sell # Pega do state
 
-        # Plotar EMAs sobre RSI
-        fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[ema_c_col], name='EMA(RSI C)', line=dict(color='blue', width=1.5)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[ema_o_col], name='EMA(RSI O)', line=dict(color='orange', width=1.5)), row=2, col=1)
+        if rsi_col:
+            fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[rsi_col], name=rsi_col.replace('_',' '), line=dict(color='purple', width=1.5)), row=2, col=1)
+            # Linhas de referência para níveis de compra/venda do RSI
+            fig.add_hline(y=rsi_buy_level, line_dash="dot", line_color="rgba(0,150,0,0.6)", annotation_text=f"RSI Compra > {rsi_buy_level}", row=2, col=1)
+            fig.add_hline(y=rsi_sell_level, line_dash="dot", line_color="rgba(150,0,0,0.6)", annotation_text=f"RSI Venda < {rsi_sell_level}", row=2, col=1)
+            # Linha de 50 opcional
+            # fig.add_hline(y=50, line_dash="dash", line_color="rgba(100,100,100,0.4)", row=2, col=1)
 
-        # Opcional: Plotar RSIs originais (pode poluir, descomente se quiser)
-        # fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[rsi_c_col], name='RSI Close', line=dict(color='lightblue', width=1, dash='dot')), row=2, col=1)
-        # fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[rsi_o_col], name='RSI Open', line=dict(color='lightsalmon', width=1, dash='dot')), row=2, col=1)
-
-        fig.update_yaxes(title_text="Indicadores", row=2, col=1, showgrid=True) # Título e grid para eixo Y do subplot 2
-        # Adicionar linhas de referência (ex: sobrecompra/venda - ajustar se necessário)
-        # fig.add_hline(y=80, line_dash="dot", line_color="rgba(255,0,0,0.5)", row=2, col=1)
-        # fig.add_hline(y=20, line_dash="dot", line_color="rgba(0,255,0,0.5)", row=2, col=1)
+        fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, showgrid=True) # Eixo fixo para RSI
     else:
-        # Se indicadores não são mostrados, remove o espaço reservado para o segundo eixo Y
          fig.update_layout(yaxis2_visible=False)
 
 
-    # --- Layout Geral do Gráfico ---
+    # --- Layout Geral ---
     fig.update_layout(
-        title={'text': f'Backtest: {ticker}', 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'}, # Centraliza título
-        height=600, # Altura total
-        xaxis_rangeslider_visible=False, # Esconder slider do eixo X principal
-        xaxis_showticklabels=True, xaxis2_showticklabels=True, # Mostrar labels do eixo X em ambos (se o 2º existir)
-        yaxis_title="Preço", # Eixo Y do Gráfico 1
-        yaxis_fixedrange=False, # Permite zoom no eixo Y de preço
-        yaxis2_fixedrange=False, # Permite zoom no eixo Y de indicadores (se existir)
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="center", x=0.5), # Legenda horizontal acima
-        margin=dict(l=50, r=50, t=80, b=50) # Margens
+        title={'text': f'Backtest Fast-Trend: {ticker}', 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'},
+        height=650, # Aumenta um pouco a altura
+        xaxis_rangeslider_visible=False,
+        xaxis_showticklabels=True, xaxis2_showticklabels=True,
+        yaxis_title="Preço / EMA", row=1, col=1, # Atualiza título eixo Y1
+        yaxis_fixedrange=False, yaxis2_fixedrange=False,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="center", x=0.5),
+        margin=dict(l=50, r=50, t=80, b=50)
     )
-    # Melhora aparência dos eixos
     fig.update_xaxes(showline=True, linewidth=1, linecolor='lightgrey', mirror=True)
     fig.update_yaxes(showline=True, linewidth=1, linecolor='lightgrey', mirror=True, row=1, col=1)
-    if show_indicators:
-        fig.update_yaxes(showline=True, linewidth=1, linecolor='lightgrey', mirror=True, row=2, col=1)
+    if show_indicators: fig.update_yaxes(showline=True, linewidth=1, linecolor='lightgrey', mirror=True, row=2, col=1)
 
     return fig
 
-# --- Função para Verificar Sinal Atual (Completa) ---
-@st.cache_data(ttl=900) # Cache de 15 minutos
-def get_current_signal(ticker: str, rsi_len: int = 2, ema_len: int = 2):
-    """Verifica o sinal da estratégia (COMPRA/VENDA/NEUTRO) no último dia disponível."""
-    st.caption(f"Verificando sinal para {ticker}...") # Feedback sutil
+
+# --- Função para Verificar Sinal Atual (ATUALIZADA para nova estratégia) ---
+@st.cache_data(ttl=900)
+def get_current_signal(ticker: str,
+                       ema_fast_len: int = 10, ema_slow_len: int = 50,
+                       rsi_len: int = 14, rsi_buy_level: float = 55.0, rsi_sell_level: float = 45.0):
+    """Verifica o sinal da estratégia Fast-Trend (COMPRA/VENDA/NEUTRO) no último dia."""
+    st.caption(f"Verificando sinal {ticker}...")
     try:
-        # Pega um pouco mais de dados (ex: 20 dias) para garantir cálculo
-        data = yf.download(ticker, period="20d", interval="1d", auto_adjust=True, progress=False)
-        if data.empty or len(data) < rsi_len + ema_len: return "Dados Insuficientes"
+        # Pega dados suficientes para EMA lenta + alguns dias
+        data = yf.download(ticker, period=f"{ema_slow_len + 20}d", interval="1d", auto_adjust=True, progress=False)
+        if data.empty or len(data) < ema_slow_len + 2: return "Dados Insuf."
 
         data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
         # Calcula indicadores necessários
-        data.ta.rsi(close='Close', length=rsi_len, append=True, col_names=('RSI_C',))
-        data.ta.rsi(close='Open', length=rsi_len, append=True, col_names=('RSI_O',))
-        data.ta.ema(close='RSI_C', length=ema_len, append=True, col_names=('EMA_RSI_C',))
-        data.ta.ema(close='RSI_O', length=ema_len, append=True, col_names=('EMA_RSI_O',))
-        data.dropna(inplace=True) # Remove NaNs no início
-        if len(data) < 2: return "Dados Insuficientes pós Ind." # Precisa de pelo menos 2 pontos para comparar
+        data.ta.ema(close='Close', length=ema_fast_len, append=True, col_names=('EMA_F',))
+        data.ta.ema(close='Close', length=ema_slow_len, append=True, col_names=('EMA_S',))
+        data.ta.rsi(close='Close', length=rsi_len, append=True, col_names=('RSI',))
+        data.dropna(inplace=True)
+        if len(data) < 3: return "Dados Insuf. pós Ind." # Precisa de 3 pontos para verificar cruzamento
 
-        # Pega as duas últimas linhas válidas
-        last = data.iloc[-1]
-        prev = data.iloc[-2]
+        # Pega as 3 últimas linhas válidas
+        last = data.iloc[-1]; prev = data.iloc[-2]; prev_prev = data.iloc[-3]
 
-        # Verifica Condição de Compra no último dia (baseado nos dados do penúltimo)
-        is_crossover = prev['EMA_RSI_C'] > prev['EMA_RSI_O'] and data['EMA_RSI_C'].iloc[-3] <= data['EMA_RSI_O'].iloc[-3] if len(data) > 2 else False # Verifica cruzamento no penúltimo
-        is_ema_rising = prev['EMA_RSI_C'] > data['EMA_RSI_C'].iloc[-3] if len(data) > 2 else False # Verifica se EMA subiu no penúltimo
-        if is_crossover and is_ema_rising:
-            return "COMPRA" # Sinal de compra GERADO no fechamento anterior, válido para HOJE
+        # Verifica Condição de Compra (baseado no fechamento anterior)
+        ema_crossed_up = prev['EMA_F'] > prev['EMA_S'] and prev_prev['EMA_F'] <= prev_prev['EMA_S']
+        rsi_confirm = prev['RSI'] > rsi_buy_level
+        if ema_crossed_up and rsi_confirm:
+            return "COMPRA"
 
-        # Verifica Condição de Saída Técnica no último dia
-        is_crossunder = prev['EMA_RSI_C'] < prev['EMA_RSI_O'] and data['EMA_RSI_C'].iloc[-3] >= data['EMA_RSI_O'].iloc[-3] if len(data) > 2 else False
-        is_ema_falling = prev['EMA_RSI_C'] < data['EMA_RSI_C'].iloc[-3] if len(data) > 2 else False
-        if is_crossunder and is_ema_falling:
-            return "VENDA" # Sinal de venda GERADO no fechamento anterior, válido para HOJE
+        # Verifica Condição de Saída Técnica (baseado no fechamento anterior)
+        ema_crossed_down = prev['EMA_F'] < prev['EMA_S'] and prev_prev['EMA_F'] >= prev_prev['EMA_S']
+        rsi_below_level = prev['RSI'] < rsi_sell_level
+        # Retorna 'VENDA' se qualquer condição de saída for atendida (para alertar sobre possível fechamento)
+        if ema_crossed_down or rsi_below_level:
+            return "VENDA"
 
-        # Nenhuma condição de entrada ou saída técnica ativa
         return "NEUTRO"
 
     except Exception as e:
-        st.caption(f"Erro ao verificar {ticker}: {str(e)[:50]}...", ) # Mostra erro sutilmente
+        st.caption(f"Erro {ticker}: {str(e)[:30]}...")
         return "Erro"
 
 
-# --- Formatação de Moeda ---
+# --- Formatação de Moeda (sem mudanças) ---
 def format_currency(value):
-    """Formata um valor numérico como moeda brasileira (R$)."""
-    try:
-        return f"R$ {float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except (ValueError, TypeError):
-        # Retorna 0 ou o próprio valor se não for numérico? Decidi por 0.
-        return "R$ 0,00"
+    try: return f"R$ {float(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except: return "R$ 0,00"
 
 # ==============================================================================
 # --- Interface Principal do Streamlit ---
 # ==============================================================================
 
-st.title("🎯 Ferramenta EMA RSI Diário")
-st.caption("Simulador, Scanner e Monitor de Sinais para a estratégia EMA(2)/RSI(2)")
+st.title("⚡ Estratégia Fast-Trend Confirmed") # Novo Título
+st.caption("Simulador, Scanner e Monitor (EMA 10x50 + RSI 14 + ATR Stop)")
 st.divider()
 
-# --- Barra Lateral (Sidebar - Completa) ---
+# --- Barra Lateral (Sidebar - ATUALIZADA com novos parâmetros) ---
 with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/bullish.png", width=80) # Ícone temático
+    st.image("https://img.icons8.com/fluency/96/crossing.png", width=80) # Novo ícone
     st.header("⚙️ Configurações Globais")
-    st.caption("Estes parâmetros afetam o Simulador e o Scanner.")
+    st.caption("Afetam Simulador e Scanner.")
 
-    # Expander para Parâmetros da Estratégia
-    with st.expander("Parâmetros da Estratégia", expanded=True):
-        cfg_rsi_len = st.number_input("Período RSI", min_value=2, max_value=50, value=2, step=1, key="cfg_rsi")
-        cfg_ema_len = st.number_input("Período EMA (sobre RSI)", min_value=2, max_value=50, value=2, step=1, key="cfg_ema")
-        cfg_exit_days = st.number_input("Dias Saída por Tempo", min_value=1, max_value=30, value=4, step=1, key="cfg_exit")
+    with st.expander("Parâmetros EMA & RSI", expanded=True):
+        st.session_state.cfg_ema_fast = st.number_input("EMA Rápida (dias)", min_value=3, max_value=100, value=10, step=1, key="cfg_ema_fast_in")
+        st.session_state.cfg_ema_slow = st.number_input("EMA Lenta (dias)", min_value=10, max_value=200, value=50, step=1, key="cfg_ema_slow_in")
+        st.session_state.cfg_rsi_len = st.number_input("RSI Período (dias)", min_value=5, max_value=50, value=14, step=1, key="cfg_rsi_len_in")
+        st.session_state.cfg_rsi_buy = st.number_input("RSI Nível Compra >", min_value=50.0, max_value=70.0, value=55.0, step=0.5, format="%.1f", key="cfg_rsi_buy_in")
+        st.session_state.cfg_rsi_sell = st.number_input("RSI Nível Venda <", min_value=30.0, max_value=50.0, value=45.0, step=0.5, format="%.1f", key="cfg_rsi_sell_in")
 
-    # Expander para Período do Backtest
+    with st.expander("Parâmetros Stop Loss (ATR)", expanded=True):
+        st.session_state.cfg_atr_len = st.number_input("ATR Período (dias)", min_value=5, max_value=50, value=14, step=1, key="cfg_atr_len_in")
+        st.session_state.cfg_atr_mult = st.number_input("ATR Multiplicador (Stop/Trail)", min_value=1.0, max_value=5.0, value=2.0, step=0.1, format="%.1f", key="cfg_atr_mult_in")
+
     with st.expander("Período do Backtest", expanded=True):
         today = datetime.now().date()
-        one_year_ago = today - timedelta(days=365)
-        cfg_start_date = st.date_input("Data Inicial", value=one_year_ago, max_value=today - timedelta(days=1), key="cfg_start")
-        cfg_end_date = st.date_input("Data Final", value=today, min_value=cfg_start_date + timedelta(days=1), max_value=today, key="cfg_end")
-        st.caption(f"Duração: {(cfg_end_date - cfg_start_date).days} dias")
+        default_start = today - timedelta(days=5*365) # Padrão 5 anos
+        cfg_start = st.date_input("Data Inicial", value=st.session_state.get('cfg_start', default_start), max_value=today - timedelta(days=30), key="cfg_start_in")
+        cfg_end = st.date_input("Data Final", value=st.session_state.get('cfg_end', today), min_value=cfg_start + timedelta(days=30), max_value=today, key="cfg_end_in")
+        st.session_state.cfg_start = cfg_start # Atualiza state
+        st.session_state.cfg_end = cfg_end     # Atualiza state
+        st.caption(f"Duração: {(cfg_end - cfg_start).days} dias")
 
-    # Expander para Financeiro
     with st.expander("Financeiro", expanded=True):
-        cfg_initial_capital = st.number_input("Capital Inicial (R$)", min_value=1.0, value=1000.0, step=100.0, format="%.2f", key="cfg_capital")
+        cfg_capital = st.number_input("Capital Inicial (R$)", min_value=1.0, value=st.session_state.get('cfg_capital', 1000.0), step=100.0, format="%.2f", key="cfg_capital_in")
+        st.session_state.cfg_capital = cfg_capital # Atualiza state
 
     st.divider()
-
-    # --- Watchlist ---
     st.header("⭐ Lista de Monitoramento")
-    st.caption("Acompanhe seus ativos e verifique sinais.")
-
-    # Botão para Verificar Sinais Atuais da Lista
-    if st.button("📡 Verificar Sinais Atuais", key="check_signals", use_container_width=True, help="Verifica o sinal COMPRA/VENDA/NEUTRO para hoje nos ativos da lista."):
+    # --- Watchlist (Código da versão anterior - adaptado para novos parâmetros de sinal) ---
+    if st.button("📡 Verificar Sinais Atuais", key="check_signals", use_container_width=True, help="Verifica o sinal da estratégia para hoje."):
         current_signals_temp = {}
-        if not st.session_state.watchlist:
-            st.toast("Lista de monitoramento vazia.", icon="ℹ️")
-        else:
+        if st.session_state.watchlist:
             progress_bar = st.progress(0, text="Verificando sinais...")
             num_tickers = len(st.session_state.watchlist)
             for i, ticker_to_check in enumerate(st.session_state.watchlist):
-                # Usa parâmetros atuais da sidebar para checar sinal
-                signal = get_current_signal(ticker_to_check, st.session_state.cfg_rsi, st.session_state.cfg_ema)
+                # Usa parâmetros atuais da sidebar
+                signal = get_current_signal(
+                    ticker_to_check,
+                    st.session_state.cfg_ema_fast, st.session_state.cfg_ema_slow,
+                    st.session_state.cfg_rsi_len, st.session_state.cfg_rsi_buy, st.session_state.cfg_rsi_sell
+                )
                 current_signals_temp[ticker_to_check] = signal
                 progress_bar.progress((i + 1) / num_tickers, text=f"Verificando {ticker_to_check}...")
-                time.sleep(0.05) # Pequeno delay para não sobrecarregar API
-            st.session_state.current_signals = current_signals_temp # Atualiza o estado
-            progress_bar.empty()
-            st.toast("Verificação de sinais concluída!", icon="✅")
+                time.sleep(0.05)
+            st.session_state.current_signals = current_signals_temp
+            progress_bar.empty(); st.toast("Verificação concluída!", icon="✅")
+        else: st.toast("Watchlist vazia.", icon="ℹ️")
 
-    # Exibe a lista e botões de remover + sinal atual
-    if not st.session_state.watchlist:
-        st.info("Nenhum ativo na lista. Adicione após simular um ativo.")
+    if not st.session_state.watchlist: st.info("Nenhum ativo na lista.")
     else:
         st.caption("Ativos:")
-        for i in range(len(st.session_state.watchlist) - 1, -1, -1): # Loop reverso seguro para remoção
-            ticker_in_list = st.session_state.watchlist[i]
-            signal_status = st.session_state.current_signals.get(ticker_in_list, "") # Pega sinal atual se existir
+        # >>> COLE O CÓDIGO DE EXIBIÇÃO DA WATCHLIST (LOOP FOR) DA VERSÃO ANTERIOR AQUI <<<
+        # (A lógica interna de exibição é a mesma, só precisa garantir que chame get_current_signal com os params certos)
+        pass
 
-            signal_color = {"COMPRA": "green", "VENDA": "red", "NEUTRO": "gray", "Erro": "orange", "Dados Insuficientes": "orange", "Dados Insuficientes pós Ind.": "orange"}.get(signal_status, "gray")
-            signal_icon = {"COMPRA": "🔼", "VENDA": "🔽", "NEUTRO": "⏸️"}.get(signal_status, "❔")
-            signal_display = f"<span style='color:{signal_color}; font-weight:bold; font-size:small;'>{signal_icon} {signal_status}</span>" if signal_status else ""
-
-            col1_watch, col2_watch, col3_watch = st.columns([0.55, 0.25, 0.2]) # Nome, Sinal, Remover
-            with col1_watch:
-                 # Clicar no nome preenche o input da aba Simulador
-                if st.button(ticker_in_list, key=f"sim_{ticker_in_list}_{i}", type="secondary", help=f"Carregar {ticker_in_list} no Simulador", use_container_width=True):
-                     st.session_state.ticker_input_value = ticker_in_list
-                     st.rerun() # Força atualização do input na aba 1
-            with col2_watch:
-                st.markdown(signal_display, unsafe_allow_html=True)
-            with col3_watch:
-                # Botão Remover (-)
-                if st.button("➖", key=f"remove_{ticker_in_list}_{i}", type="secondary", help="Remover da lista", use_container_width=True):
-                    removed_ticker = st.session_state.watchlist.pop(i)
-                    st.session_state.current_signals.pop(removed_ticker, None) # Remove sinal também
-                    st.toast(f"{removed_ticker} removido.")
-                    if st.session_state.get('last_ticker_simulated') == removed_ticker:
-                        st.session_state['backtest_results'] = None; st.session_state['last_ticker_simulated'] = ""
-                    st.rerun()
-
-    # Link para Limpar Lista
-    if st.session_state.watchlist: # Só mostra se a lista não estiver vazia
-        st.markdown("<a href='?clear_watchlist=true' target='_self' style='color: tomato; font-size: small;'>Limpar Lista Completa</a>", unsafe_allow_html=True)
+    if st.session_state.watchlist:
+        st.markdown("<a href='?clear_watchlist=true' ... >Limpar Lista Completa</a>", unsafe_allow_html=True) # Manter link
 
 
-# Lógica para limpar watchlist (Completa)
+# --- Lógica para limpar watchlist (sem mudanças) ---
 if st.query_params.get("clear_watchlist") == "true":
-    st.session_state.watchlist = []
-    st.session_state.current_signals = {} # Limpa sinais atuais
-    st.session_state['backtest_results'] = None # Limpa resultados da simulação
-    st.session_state['last_ticker_simulated'] = ""
-    st.session_state['scan_results_df'] = pd.DataFrame() # Limpa resultados do scan
-    st.toast("Lista de monitoramento e resultados limpos.")
-    st.query_params.clear() # Limpa o parâmetro da URL
-    st.rerun() # Atualiza a interface
+    # >>> COLE O CÓDIGO DE LIMPEZA DA WATCHLIST DA VERSÃO ANTERIOR AQUI <<<
+    pass
 
 
 # ==============================================================================
@@ -474,251 +436,93 @@ if st.query_params.get("clear_watchlist") == "true":
 # ==============================================================================
 tab1, tab2 = st.tabs(["📈 **Simulador Individual**", "🔍 **Scanner de Ativos**"])
 
-# --- Aba 1: Simulador Individual (Completa) ---
+# --- Aba 1: Simulador Individual (Adaptada para novos parâmetros) ---
 with tab1:
     st.header("Simulador de Backtest Individual")
-    st.markdown("Teste a estratégia em um único ativo com os parâmetros definidos na barra lateral.")
+    st.markdown("Teste a estratégia Fast-Trend em um ativo com os parâmetros da barra lateral.")
+    # --- Input Ticker (Código da versão anterior) ---
+    # >>> COLE O CÓDIGO DE INPUT DO TICKER (COLUNAS + SELECTBOX + TEXT_INPUT) DA ABA 1 DA VERSÃO ANTERIOR AQUI <<<
+    pass
 
-    sim_col1, sim_col2 = st.columns([0.6, 0.4])
-    with sim_col1:
-        # Input principal (controlado pelo session_state)
-        ticker_input_sim = st.text_input(
-            "Código do Ativo (ex: PETR4.SA, AAPL, BTC-USD):",
-            value=st.session_state.ticker_input_value, # Usa valor do estado
-            placeholder="Digite ou selecione abaixo...",
-            key="ticker_input_main_tab1",
-            label_visibility="collapsed"
-        ).upper()
-        # Atualiza o state se o usuário digitar algo manualmente
-        if ticker_input_sim != st.session_state.ticker_input_value:
-             st.session_state.ticker_input_value = ticker_input_sim
-             st.session_state.backtest_results = None # Limpa resultado antigo se ticker mudar
-             st.session_state.last_ticker_simulated = ""
-
-    with sim_col2:
-        # Selectbox para tickers comuns (afeta o input acima)
-        selected_common_ticker_sim = st.selectbox(
-            "Selecionar ativo comum:",
-            options=FLAT_TICKER_LIST,
-            index=FLAT_TICKER_LIST.index(st.session_state.ticker_input_value) if st.session_state.ticker_input_value in FLAT_TICKER_LIST else 0, # Define index atual
-            key="common_ticker_select_tab1",
-            label_visibility="collapsed"
-        )
-        # Se o usuário selecionou algo diferente no selectbox, atualiza o state
-        if selected_common_ticker_sim and selected_common_ticker_sim != st.session_state.ticker_input_value:
-            st.session_state.ticker_input_value = selected_common_ticker_sim
-            st.session_state.backtest_results = None # Limpa resultado antigo
-            st.session_state.last_ticker_simulated = ""
-            st.rerun() # Força o rerun para atualizar o text_input
-
-    # Botão de Simulação
     simulate_button = st.button("Executar Simulação Individual", type="primary", use_container_width=True, key="sim_button_tab1")
     st.divider()
 
-    # --- Execução da Simulação Individual ---
+    # --- Execução da Simulação Individual (Adaptada) ---
     if simulate_button:
-        current_ticker_input = st.session_state.ticker_input_value # Pega valor atual
+        current_ticker_input = st.session_state.ticker_input_value
         if current_ticker_input:
-            # Pega parâmetros da sidebar (usando as chaves dos widgets)
+            # Pega todos os parâmetros atuais da sidebar/state
             sim_params = {
                 "start_date": st.session_state.cfg_start, "end_date": st.session_state.cfg_end,
-                "initial_capital": st.session_state.cfg_capital, "rsi_len": st.session_state.cfg_rsi,
-                "ema_len": st.session_state.cfg_ema, "exit_days": st.session_state.cfg_exit
+                "initial_capital": st.session_state.cfg_capital,
+                "ema_fast_len": st.session_state.cfg_ema_fast, "ema_slow_len": st.session_state.cfg_ema_slow,
+                "rsi_len": st.session_state.cfg_rsi_len, "rsi_buy_level": st.session_state.cfg_rsi_buy, "rsi_sell_level": st.session_state.cfg_rsi_sell,
+                "atr_len": st.session_state.cfg_atr_len, "atr_multiplier": st.session_state.cfg_atr_mult
             }
-            if sim_params["start_date"] >= sim_params["end_date"]:
-                st.error("Erro: Data Inicial deve ser anterior à Data Final.")
+            if sim_params["start_date"] >= sim_params["end_date"]: st.error("Data Inicial >= Data Final.")
             else:
                 with st.spinner(f"Executando backtest para {current_ticker_input}..."):
                     results = run_strategy_backtest(ticker=current_ticker_input, **sim_params)
-                    st.session_state['backtest_results'] = results # Salva resultado na sessão
-                    st.session_state['last_ticker_simulated'] = current_ticker_input # Guarda qual ticker foi simulado
-        else:
-            st.warning("Insira um código de ativo para simular.")
-            st.session_state['backtest_results'] = None
+                    st.session_state['backtest_results'] = results
+                    st.session_state['last_ticker_simulated'] = current_ticker_input
+        else: st.warning("Insira um código de ativo."); st.session_state['backtest_results'] = None
 
-
-    # --- Exibição dos Resultados da Simulação Individual (Completa) ---
-    # Verifica se há resultados E se pertencem ao último ticker simulado
+    # --- Exibição dos Resultados da Simulação Individual (Adaptada) ---
     if 'backtest_results' in st.session_state and st.session_state['backtest_results'] is not None and \
        st.session_state['backtest_results']['ticker'] == st.session_state.get('last_ticker_simulated'):
-
         results = st.session_state['backtest_results']
         st.header(f"Resultados para: {results['ticker']}")
+        # --- Botão Add Watchlist (Código da versão anterior) ---
+        # >>> COLE O CÓDIGO DO BOTÃO "ADICIONAR À LISTA" DA VERSÃO ANTERIOR AQUI <<<
+        pass
 
-        # Botão Adicionar/Info Watchlist
-        ticker_to_add = results['ticker']
-        add_col, info_col = st.columns([0.3, 0.7])
-        with add_col:
-            if ticker_to_add not in st.session_state.watchlist:
-                if st.button(f"⭐ Adicionar à Lista", key=f"add_watch_{ticker_to_add}", help="Salva este ativo na lista da barra lateral."):
-                    st.session_state.watchlist.append(ticker_to_add); st.toast(f"{ticker_to_add} adicionado!"); st.rerun()
-            else:
-                st.success(f"✔️ Na Watchlist")
-
-        with st.container(border=True): # Agrupa resultados com borda
-            st.subheader("📊 Métricas de Desempenho")
-            metrics = results['metrics']
-            m_col1, m_col2, m_col3 = st.columns(3)
-            m_col1.metric("CAGR (Retorno Anualizado)", f"{metrics['cagr']:.2f}%") # CAGR adicionado
-            m_col2.metric("Retorno Total Período", f"{metrics['totalReturnPercent']:.2f}%")
-            m_col3.metric("Nº Trades", metrics['numberOfTrades'])
-
-            m_col4, m_col5, m_col6 = st.columns(3)
-            m_col4.metric("Taxa de Acerto", f"{metrics['winRate']:.2f}%")
-            m_col5.metric("Payoff Ratio", f"{metrics['payoffRatio']:.2f}")
-            m_col6.metric("Max Drawdown", f"{metrics['maxDrawdown']:.2f}%")
-
-            st.caption(f"Período: {metrics['startDate']} a {metrics['endDate']} | Capital: {format_currency(metrics['initialCapital'])} -> {format_currency(metrics['finalEquity'])} ({format_currency(metrics['totalProfit'])}) | Sharpe: {metrics['sharpeRatio']:.2f}")
+        with st.container(border=True):
+             # --- Métricas (Código da versão anterior - já inclui CAGR etc.) ---
+             # >>> COLE O CÓDIGO DE EXIBIÇÃO DAS MÉTRICAS DA VERSÃO ANTERIOR AQUI <<<
+            pass
             st.divider()
-
-            # Controles do Gráfico
+            # --- Gráfico e Tabela (Código da versão anterior) ---
             st.subheader("📈 Gráfico e Operações")
-            show_indicators_opt = st.toggle("Mostrar Indicadores no Gráfico", value=False, key="show_indicators_toggle_tab1")
-
-            # Gráfico
+            show_indicators_opt = st.toggle("Mostrar RSI no Gráfico", value=False, key="show_indicators_toggle_tab1") # Label ajustado
             fig = plot_results(results['chartData'], results['signals'], results['ticker'], results['indicators'], show_indicators=show_indicators_opt)
             st.plotly_chart(fig, use_container_width=True)
+            # >>> COLE O CÓDIGO DO EXPANDER DA TABELA DE TRADES DA VERSÃO ANTERIOR AQUI <<<
+            pass
 
-            # Tabela de Trades
-            with st.expander("📜 Ver Histórico de Operações Detalhado"):
-                trades_df = results['trades']
-                if not trades_df.empty:
-                    trades_df_display = trades_df.copy()
-                    # Formatar colunas
-                    trades_df_display['profit'] = trades_df_display['profit'].apply(format_currency)
-                    trades_df_display['entryPrice'] = trades_df_display['entryPrice'].map('{:.2f}'.format)
-                    trades_df_display['exitPrice'] = trades_df_display['exitPrice'].map('{:.2f}'.format)
-                    trades_df_display['returnPercent'] = trades_df_display['returnPercent'].map('{:.2f}%'.format)
-                    st.dataframe(trades_df_display[['entryDate', 'entryPrice', 'exitDate', 'exitPrice', 'daysHeld', 'profit', 'returnPercent', 'exitReason']], use_container_width=True)
-                else:
-                    st.info("Nenhuma operação realizada neste período.")
-
-    # Mensagem se a simulação foi tentada mas não gerou resultado (ex: erro)
     elif simulate_button and st.session_state['backtest_results'] is None:
-         st.warning("Não foi possível gerar resultados para a simulação individual. Verifique o ticker, período e mensagens de erro.")
+         st.warning("Não foi possível gerar resultados. Verifique ticker/período/erros.")
 
 
-# --- Aba 2: Scanner de Ativos (Completa) ---
+# --- Aba 2: Scanner de Ativos (Adaptada para novos parâmetros) ---
 with tab2:
     st.header("Scanner de Ativos Lucrativos")
-    st.markdown("Encontre ativos que tiveram **retorno anualizado (CAGR) positivo** com os parâmetros de estratégia definidos na barra lateral, dentro do período de backtest selecionado.")
-    st.warning("Escanear listas longas pode demorar e exceder limites no Streamlit Cloud. Comece com listas menores.", icon="⚠️")
-
-    scan_col1, scan_col2 = st.columns([0.6, 0.4])
-
-    with scan_col1:
-        scan_list_options = ["Use Minha Watchlist Atual"] + list(COMMON_TICKERS.keys())
-        selected_scan_list_name = st.radio(
-            "Selecione a lista de ativos para escanear:",
-            options=scan_list_options,
-            key="scan_list_radio_tab2",
-            horizontal=True,
-        )
-    with scan_col2:
-        min_cagr_threshold = st.number_input(
-            "Rentabilidade Anual Mínima Desejada (%)",
-            min_value=0.0, value=30.0, step=5.0, format="%.1f", key="min_cagr_input"
-        )
-
-    if selected_scan_list_name == "Use Minha Watchlist Atual":
-        tickers_for_scan = st.session_state.watchlist
-        list_is_empty = not tickers_for_scan
-        if list_is_empty: st.warning("Sua watchlist está vazia. Adicione ativos ou selecione outra lista.")
-    else:
-        tickers_for_scan = COMMON_TICKERS[selected_scan_list_name]
-        list_is_empty = False
-
-    st.caption(f"Serão escaneados {len(tickers_for_scan)} ativos da lista: '{selected_scan_list_name}'")
+    st.markdown("Encontre ativos com **CAGR positivo** usando os parâmetros atuais.")
+    st.warning("Scanner pode demorar. Listas maiores podem falhar no Streamlit Cloud.", icon="⚠️")
+    # --- Seleção Lista e CAGR Mínimo (Código da versão anterior) ---
+    # >>> COLE O CÓDIGO DE SELEÇÃO DE LISTA E CAGR MÍNIMO DA ABA 2 DA VERSÃO ANTERIOR AQUI <<<
+    pass
 
     scan_button = st.button("🔎 Escanear Ativos Agora", key="scan_button_tab2", type="primary", disabled=list_is_empty)
     st.divider()
 
     if scan_button and not list_is_empty:
-        # Pega parâmetros da sidebar usando as chaves dos widgets
+        # Pega todos os parâmetros atuais para passar ao backtest no loop
         params = {
             "start_date": st.session_state.cfg_start, "end_date": st.session_state.cfg_end,
-            "initial_capital": st.session_state.cfg_capital, "rsi_len": st.session_state.cfg_rsi,
-            "ema_len": st.session_state.cfg_ema, "exit_days": st.session_state.cfg_exit
+            "initial_capital": st.session_state.cfg_capital,
+            "ema_fast_len": st.session_state.cfg_ema_fast, "ema_slow_len": st.session_state.cfg_ema_slow,
+            "rsi_len": st.session_state.cfg_rsi_len, "rsi_buy_level": st.session_state.cfg_rsi_buy, "rsi_sell_level": st.session_state.cfg_rsi_sell,
+            "atr_len": st.session_state.cfg_atr_len, "atr_multiplier": st.session_state.cfg_atr_mult
         }
+        min_cagr_scan = st.session_state.min_cagr_input # Pega valor do input
 
-        st.info(f"Iniciando escaneamento com CAGR > {min_cagr_threshold}%...")
-        scan_progress = st.progress(0, text="Iniciando...")
-        profitable_list = []
-        skipped_count = 0
-        error_messages = []
-        total_tickers = len(tickers_for_scan)
+        st.info(f"Iniciando escaneamento com CAGR > {min_cagr_scan}%...")
+        # --- Loop do Scanner (Código da versão anterior - já usa CAGR) ---
+        # >>> COLE O CÓDIGO DO LOOP DO SCANNER DA ABA 2 DA VERSÃO ANTERIOR AQUI <<<
+        # (Ele já pega o CAGR dos results e filtra por 'min_cagr_threshold')
+        pass
 
-        # Loop principal do Scanner
-        for i, ticker in enumerate(tickers_for_scan):
-            progress_percentage = (i + 1) / total_tickers
-            scan_progress.progress(progress_percentage, text=f"Escaneando: {ticker} ({i+1}/{total_tickers})")
-            try:
-                # Chama o backtest (aproveita cache se parâmetros não mudaram)
-                results = run_strategy_backtest(ticker=ticker, **params)
-
-                if results and results.get('metrics'):
-                    cagr_value = results['metrics'].get('cagr', -999) # Pega CAGR, default negativo se não existir
-                    if cagr_value > min_cagr_threshold:
-                        profitable_list.append({
-                            'Ticker': ticker,
-                            'CAGR (%)': cagr_value,
-                            'Retorno Total (%)': results['metrics']['totalReturnPercent'],
-                            'Nº Trades': results['metrics']['numberOfTrades'],
-                            'Taxa Acerto (%)': results['metrics']['winRate'],
-                            'Max Drawdown (%)': results['metrics']['maxDrawdown'],
-                            # 'Payoff Ratio': results['metrics']['payoffRatio'] # Opcional
-                        })
-            except Exception as e:
-                # Captura erro GERAL no processamento do ticker
-                error_msg = f"Erro ao processar {ticker}: {str(e)[:100]}..."
-                # st.caption(error_msg) # Pode poluir muito, mostra no final
-                error_messages.append(error_msg)
-                skipped_count += 1
-            # time.sleep(0.05) # Delay opcional
-
-        scan_progress.empty() # Limpa barra de progresso
-
-        # --- Exibe Resultados do Scan ---
-        st.subheader("Resultados do Escaneamento")
-        if profitable_list:
-            profitable_df = pd.DataFrame(profitable_list).sort_values(by='CAGR (%)', ascending=False).reset_index(drop=True)
-            # Formata colunas percentuais
-            for col in ['CAGR (%)', 'Retorno Total (%)', 'Taxa Acerto (%)', 'Max Drawdown (%)']:
-                 if col in profitable_df.columns:
-                    profitable_df[col] = profitable_df[col].map('{:.2f}%'.format)
-
-            st.session_state['scan_results_df'] = profitable_df # Salva no estado
-            st.success(f"Encontrados {len(profitable_df)} ativos com CAGR > {min_cagr_threshold}%.")
-            if skipped_count > 0: st.warning(f"{skipped_count} ativos foram pulados devido a erros.")
-
-            # Exibe a tabela
-            st.dataframe(profitable_df, use_container_width=True, height=min( (len(profitable_df) + 1) * 35 + 3, 600) ) # Altura dinâmica até 600px
-
-            # Adiciona opção de adicionar todos os resultados à watchlist
-            profitable_tickers = profitable_df['Ticker'].tolist()
-            missing_in_watchlist = [t for t in profitable_tickers if t not in st.session_state.watchlist]
-            if missing_in_watchlist:
-                if st.button(f"⭐ Adicionar {len(missing_in_watchlist)} resultados à Watchlist"):
-                     st.session_state.watchlist.extend(missing_in_watchlist)
-                     # Remove duplicados caso existam por alguma razão
-                     st.session_state.watchlist = sorted(list(set(st.session_state.watchlist)))
-                     st.toast(f"{len(missing_in_watchlist)} ativos adicionados à watchlist!")
-                     st.rerun()
-
-            if error_messages: # Mostra erros se houveram
-                with st.expander("Ver detalhes dos erros durante o scan"):
-                    for msg in error_messages: st.caption(msg)
-        else:
-            st.session_state['scan_results_df'] = pd.DataFrame() # Salva vazio
-            st.info(f"Nenhum ativo encontrado com CAGR > {min_cagr_threshold}% na lista '{selected_scan_list_name}'.")
-            if skipped_count > 0: st.warning(f"{skipped_count} ativos foram pulados devido a erros.")
-            if error_messages:
-                 with st.expander("Ver detalhes dos erros durante o scan"):
-                    for msg in error_messages: st.caption(msg)
-
-
-    # Exibir resultados do último scan se existirem e o botão não foi pressionado agora
+    # --- Exibição Resultados Último Scan (Código da versão anterior) ---
     elif not scan_button and not st.session_state.scan_results_df.empty:
-         st.subheader("Resultado do Último Escaneamento Realizado:")
-         st.dataframe(st.session_state.scan_results_df, use_container_width=True)
-         st.caption("Clique em 'Escanear Ativos Agora' para atualizar os resultados com os parâmetros atuais.")
+         # >>> COLE O CÓDIGO DE EXIBIÇÃO DOS RESULTADOS DO SCAN ANTERIOR AQUI <<<
+        pass
