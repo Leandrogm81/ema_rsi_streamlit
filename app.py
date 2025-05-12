@@ -1,24 +1,24 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import pandas_ta as ta # Usaremos para EMA, RSI, ATR
+import pandas_ta as ta
 import yfinance as yf
 import numpy as np
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots # Para subplots
+from plotly.subplots import make_subplots
 from datetime import datetime, timedelta, date
-import quantstats as qs # Para métricas avançadas
-import time # Para pequeno delay opcional
+import quantstats as qs
+import time
 
 # --- Configuração da Página Streamlit ---
 st.set_page_config(
     page_title="Estratégia Fast-Trend Confirmed",
-    page_icon="⚡", # Novo Ícone
+    page_icon="⚡",
     layout="wide"
 )
 
 # --- Inicialização do Session State ---
-default_watchlist = ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "AAPL", "MSFT", "GOOGL", "BTC-USD", "ETH-USD"]
+default_watchlist = ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "AAPL", "MSFT", "GOOGL", "BTC-USD", "ETH-USD"] # Mantém exemplos diversos
 if 'watchlist' not in st.session_state: st.session_state.watchlist = default_watchlist
 if 'backtest_results' not in st.session_state: st.session_state.backtest_results = None
 if 'last_ticker_simulated' not in st.session_state: st.session_state.last_ticker_simulated = ""
@@ -37,20 +37,72 @@ if 'cfg_capital' not in st.session_state: st.session_state.cfg_capital = 1000.0
 if 'min_cagr_input' not in st.session_state: st.session_state.min_cagr_input = 30.0
 if 'scan_results_df' not in st.session_state: st.session_state.scan_results_df = pd.DataFrame()
 
-# --- Lista de Tickers Comuns ---
+# --- NOVAS Listas de Tickers Comuns ---
+BR_TICKERS_RAW = [
+    "ABEV3", "ALOS3", "ALPA4", "AMER3", "ASAI3", "AZUL4",
+    "B3SA3", "BBAS3", "BBDC3", "BBDC4", "BBSE3", "BEEF3", "BLAU3", "BPAC11", "BRAP4", "BRFS3", "BRKM5", "BRML3", # BRML3 pode não existir mais
+    "CASH3", "CCRO3", "CIEL3", "CMIG4", "COGN3", "CPFE3", "CRFB3", "CSAN3", "CSNA3", "CVCB3", "CYRE3", "DIRR3",
+    "ELET3", "ELET6", "EMBR3", "ENEV3", "ENGI11", "EQTL3", "EZTC3",
+    "FLRY3",
+    "GGBR4", "GOAU4", "GOLL4",
+    "HAPV3", "HYPE3",
+    "IGTI11", "IRBR3", "ITSA4", "ITUB4",
+    "JBSS3", "JHSF3",
+    "KLBN11",
+    "LREN3",
+    "MGLU3", "MOVI3", "MULT3", # MULT3 pode ter virado ALOS3 ou outra
+    "NTCO3",
+    "PETR3", "PETR4", "PETZ3", "PRIO3", "QUAL3",
+    "RADL3", "RAIL3", "RAIZ4", "RENT3", "RRRP3",
+    "SANB11", "SBSP3", "SLCE3", "SMFT3", "SOMA3", "SUZB3",
+    "TAEE11", "TIMS3", "TOTS3",
+    "UGPA3", "USIM5",
+    "VALE3", "VIVT3",
+    "WEGE3",
+    "YDUQ3"
+]
+# Adiciona sufixo .SA para tickers brasileiros
+BR_TICKERS = [ticker + ".SA" for ticker in BR_TICKERS_RAW]
+
+US_TICKERS = [
+    "AAPL", "ABT", "ACAD", "ADBE", "ADI", "ADP", "AEP", "AFRM", "AIG", "AKAM",
+    "ALL", "AMD", "AMGN", "AMZN", "AON", "APA", "APLS", "APTV", "ARM", "ASML",
+    "AVGO", "AXON", "BAC", "BA", "BABA", "BB", "BBD",  "BBWI", # Removido ATVI (adquirida), BBBYQ (falida)
+    "BHP", "BIDU", "BKR", "BLK", "BLNK", "BMY", "BP", "BRK-B", "BSX", "C", # BRK.B -> BRK-B
+    "CARR", "CAT", "CCJ", "CELH", "CHPT", "CL", "CMCSA", "COIN", "COP", "COST",
+    "CRM", "CRWD", "CSCO", "CSL", "CVX", "CVS", "CZR", "DAL", "DASH", "DDOG",
+    "DE", "DELL", "DEO", "DHI", "DIS", "DKNG", "DOW", "DVN",  "EA", # Removido DYN (adquirida/mudou)
+    "EBAY", "ECL", "EIX", "EL", "ELY", "EME", "ENPH", "EPAM", "EQNR", "EQT",
+    "ET", "ETSY", "EXC", "F", "FDX", "FE", "FFIE", "FIS", "FISV", "FMG", # FMG é australiana, mas pode ter ADR
+    "FSLR", "GE", "GM", "GME", "GOOGL", "GOOG", "GS", "HD", "HKD", # FRCB (falida)
+    "HON", "HPE", "HPQ", "ICE", "ILMN", "INTC", "IONQ", "IQ", "ITUB", "IVR", # ITUB é brasileiro, mas tem ADR (ITUB)
+    "JNJ", "JPM", "JWN", "KBH", "KEY", "KGC", "KHC", "KMI", "KO", "KR",
+    "LCID", "LLY", "LMT", "LOW", "LRCX", "LVS", "LYFT", "MARA", "MCD", "MDT",
+    "META", "MGM", "MMM", "MO", "MRNA", "MS", "MSFT", "MU", "MUR", "NCLH",
+    "NEE", "NFLX", "NGD", "NKE", "NLY", "NOC", "NOK", "NOV", "NRG", "NVDA",
+    "NVO", "NXP", "O", "OIH", "ON", "ORCL", "OXY", "PANW", "PARA", "PBR", # PBR é brasileiro, mas tem ADR (PBR)
+    "PDD", "PFE", "PG", "PLTR", "PM", "PPL", "PYPL", "QCOM", "QQQ", "RBLX",
+    "REGN", "REMX", "RIG", "RIO", "RIVN", "ROKU", "RRC", "RTX", "SBUX", "SE",
+    "SHOP", "SMCI", "SNAP", "SNOW", "SOFI", "SOXL", "SPCE", "SPOT", "SPWR", "SPY",
+    "SQ", "SSNLF", "STLA", "SYF", "T", "TGT", "TLRY", "TMUS", "TQQQ", "TRV",
+    "TSLA", "TSM", "TTWO", "TXN", "UAL", "UBER", "UNH", "UPS", "USB", "UVXY",
+    "V", "VLO", "VOD", "VRTX", "VXX", "VZ", "WBA", "WBD", "WDC", "WFC",
+    "WMT", "X", "XOM", "XPEV", "XRT", "YINN", "YUM", "Z", "ZM", "ZS"
+]
+
 COMMON_TICKERS = {
-    "IBOV (Exemplos)": ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "ABEV3.SA", "MGLU3.SA", "WEGE3.SA", "B3SA3.SA", "RENT3.SA", "PRIO3.SA"],
-    "US Tech (Exemplos)": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AMD", "INTC", "CSCO"],
-    "Cripto (Exemplos)": ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "DOGE-USD", "AVAX-USD", "LINK-USD"]
+    "BR Tickers": BR_TICKERS,
+    "US Tickers": US_TICKERS,
+    "Cripto (Exemplos)": ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD", "DOGE-USD", "AVAX-USD", "LINK-USD"] # Mantém cripto como antes
 }
 FLAT_TICKER_LIST = [""] + sorted(list(set(ticker for sublist in COMMON_TICKERS.values() for ticker in sublist)))
 
-# --- Função de Métricas ---
+
+# --- Função de Métricas (sem mudanças) ---
 def calculate_metrics(trades_df, equity_curve_df, initial_capital):
     metrics = {"winRate": 0, "payoffRatio": 0, "avgGain": 0, "avgLoss": 0, "maxDrawdown": 0, "sharpeRatio": 0, "cagr": 0}
     if trades_df.empty or equity_curve_df.empty: return metrics
-    wins = trades_df[trades_df['profit'] > 0]; losses = trades_df[trades_df['profit'] <= 0]
-    total_trades = len(trades_df)
+    wins = trades_df[trades_df['profit'] > 0]; losses = trades_df[trades_df['profit'] <= 0]; total_trades = len(trades_df)
     metrics["winRate"] = round((len(wins) / total_trades * 100), 2) if total_trades > 0 else 0
     metrics["avgGain"] = round(wins['profit'].mean(), 2) if not wins.empty else 0
     metrics["avgLoss"] = round(abs(losses['profit'].mean()), 2) if not losses.empty else 0
@@ -68,7 +120,7 @@ def calculate_metrics(trades_df, equity_curve_df, initial_capital):
         if pd.isna(v): metrics[k] = 0
     return metrics
 
-# --- Função do Backtest (Estratégia Fast-Trend Confirmed) ---
+# --- Função do Backtest (sem mudanças na lógica interna) ---
 @st.cache_data(ttl=3600)
 def run_strategy_backtest(ticker: str, start_date: date, end_date: date, initial_capital: float = 1000.0,
                           ema_fast_len: int = 10, ema_slow_len: int = 50, rsi_len: int = 14, rsi_buy_level: float = 55.0,
@@ -149,19 +201,11 @@ def run_strategy_backtest(ticker: str, start_date: date, end_date: date, initial
     st.caption(f"Backtest '{ticker}' concluído.")
     return results
 
-# --- Função para Plotar o Gráfico (CORRIGIDA - Novamente) ---
+# --- Função para Plotar o Gráfico (sem mudanças na lógica interna) ---
 def plot_results(chart_data_df, signals, ticker, indicators_cols, show_indicators=False):
     if chart_data_df.empty: st.warning("Não há dados para plotar."); return go.Figure()
-
-    # Define especificações do subplot baseado em show_indicators
-    rows = 2 if show_indicators else 1
-    row_heights = [0.7, 0.3] if show_indicators else [1.0]
-    specs = [[{}], [{}]] if show_indicators else [[{}]] # Define a estrutura das células
-
-    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True,
-                        vertical_spacing=0.05, row_heights=row_heights, specs=specs)
-
-    # --- Traces da Linha 1 (Preço, EMAs, Sinais) ---
+    rows = 2 if show_indicators else 1; row_heights = [0.7, 0.3] if show_indicators else [1.0]; specs = [[{}], [{}]] if show_indicators else [[{}]]
+    fig = make_subplots(rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=row_heights, specs=specs)
     fig.add_trace(go.Candlestick(x=chart_data_df['Date'], open=chart_data_df['Open'], high=chart_data_df['High'], low=chart_data_df['Low'], close=chart_data_df['Close'], name='OHLC', increasing_line_color='green', decreasing_line_color='red'), row=1, col=1)
     ema_f_col = indicators_cols.get('ema_f'); ema_s_col = indicators_cols.get('ema_s')
     if ema_f_col and ema_s_col:
@@ -170,35 +214,21 @@ def plot_results(chart_data_df, signals, ticker, indicators_cols, show_indicator
     buy_signals_df = pd.DataFrame([s for s in signals if s['type'] == 'buy']); sell_signals_df = pd.DataFrame([s for s in signals if s['type'] == 'sell'])
     if not buy_signals_df.empty: fig.add_trace(go.Scatter(x=buy_signals_df['date'], y=buy_signals_df['price'], mode='markers', name='Compra', marker=dict(color='green', size=10, symbol='triangle-up', line=dict(width=1, color='DarkSlateGrey'))), row=1, col=1)
     if not sell_signals_df.empty: fig.add_trace(go.Scatter(x=sell_signals_df['date'], y=sell_signals_df['price'], mode='markers', name='Venda', marker=dict(color='red', size=10, symbol='triangle-down', line=dict(width=1, color='DarkSlateGrey'))), row=1, col=1)
-
-    # --- Traces da Linha 2 (RSI) - Somente se show_indicators for True ---
     if show_indicators:
         rsi_col = indicators_cols.get('rsi'); rsi_buy_level = st.session_state.cfg_rsi_buy; rsi_sell_level = st.session_state.cfg_rsi_sell
         if rsi_col:
             fig.add_trace(go.Scatter(x=chart_data_df['Date'], y=chart_data_df[rsi_col], name=rsi_col.replace('_',' '), line=dict(color='purple', width=1.5)), row=2, col=1)
             fig.add_hline(y=rsi_buy_level, line_dash="dot", line_color="rgba(0,150,0,0.6)", annotation_text=f"RSI Compra > {rsi_buy_level}", annotation_position="bottom right", row=2, col=1)
             fig.add_hline(y=rsi_sell_level, line_dash="dot", line_color="rgba(150,0,0,0.6)", annotation_text=f"RSI Venda < {rsi_sell_level}", annotation_position="top right", row=2, col=1)
-        # Configura o eixo Y2 apenas quando ele existe
         fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1, showgrid=True, showline=True, linewidth=1, linecolor='lightgrey', mirror=True)
-        fig.update_xaxes(showticklabels=True, row=2, col=1) # Garante labels no eixo X compartilhado
-
-    # --- Layout Geral ---
-    fig.update_layout(
-        title={'text': f'Backtest Fast-Trend: {ticker}', 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'},
-        height=650,
-        xaxis_rangeslider_visible=False,
-        yaxis_title="Preço / EMA", # Título do eixo Y da primeira linha
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="center", x=0.5),
-        margin=dict(l=50, r=50, t=80, b=50)
-    )
-    # Configurações dos eixos da primeira linha (sempre existem)
+        fig.update_xaxes(showticklabels=True, row=2, col=1)
+    fig.update_layout(title={'text': f'Backtest Fast-Trend: {ticker}', 'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'}, height=650, xaxis_rangeslider_visible=False, yaxis_title="Preço / EMA", legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="center", x=0.5), margin=dict(l=50, r=50, t=80, b=50))
     fig.update_xaxes(showline=True, linewidth=1, linecolor='lightgrey', mirror=True, showticklabels=True, row=1, col=1)
     fig.update_yaxes(title_text="Preço / EMA", fixedrange=False, showline=True, linewidth=1, linecolor='lightgrey', mirror=True, row=1, col=1)
-
+    if not show_indicators: fig.update_layout(xaxis2_visible=False, yaxis2_visible=False)
     return fig
 
-
-# --- Função para Verificar Sinal Atual (Estratégia Fast-Trend) ---
+# --- Função para Verificar Sinal Atual (sem mudanças na lógica interna) ---
 @st.cache_data(ttl=900)
 def get_current_signal(ticker: str, ema_fast_len: int = 10, ema_slow_len: int = 50, rsi_len: int = 14, rsi_buy_level: float = 55.0, rsi_sell_level: float = 45.0):
     st.caption(f"Verificando sinal {ticker}...")
@@ -209,7 +239,7 @@ def get_current_signal(ticker: str, ema_fast_len: int = 10, ema_slow_len: int = 
         data.ta.ema(close='Close', length=ema_fast_len, append=True, col_names=('EMA_F',))
         data.ta.ema(close='Close', length=ema_slow_len, append=True, col_names=('EMA_S',))
         data.ta.rsi(close='Close', length=rsi_len, append=True, col_names=('RSI',))
-        data.dropna(inplace=True)
+        data.dropna(inplace=True);
         if len(data) < 3: return "Dados Insuf. pós Ind."
         last = data.iloc[-1]; prev = data.iloc[-2]; prev_prev = data.iloc[-3]
         ema_crossed_up = prev['EMA_F'] > prev['EMA_S'] and prev_prev['EMA_F'] <= prev_prev['EMA_S']
@@ -262,8 +292,7 @@ with st.sidebar:
     if st.button("📡 Verificar Sinais Atuais", key="check_signals", use_container_width=True, help="Verifica o sinal da estratégia para hoje."):
         current_signals_temp = {}
         if st.session_state.watchlist:
-            prog_bar = st.progress(0, text="Verificando sinais...")
-            n_tickers = len(st.session_state.watchlist)
+            prog_bar = st.progress(0, text="Verificando sinais..."); n_tickers = len(st.session_state.watchlist)
             for i, ticker_chk in enumerate(st.session_state.watchlist):
                 sig = get_current_signal(ticker_chk, st.session_state.cfg_ema_fast, st.session_state.cfg_ema_slow, st.session_state.cfg_rsi_len, st.session_state.cfg_rsi_buy, st.session_state.cfg_rsi_sell)
                 current_signals_temp[ticker_chk] = sig; prog_bar.progress((i + 1) / n_tickers, text=f"Verificando {ticker_chk}..."); time.sleep(0.05)
@@ -291,8 +320,8 @@ with st.sidebar:
 # Lógica para limpar watchlist
 if st.query_params.get("clear_watchlist") == "true":
     st.session_state.watchlist = []; st.session_state.current_signals = {}; st.session_state['backtest_results'] = None
-    st.session_state['last_ticker_simulated'] = ""; st.session_state['scan_results_df'] = pd.DataFrame()
-    st.toast("Lista e resultados limpos."); st.query_params.clear(); st.rerun()
+    st.session_state['last_ticker_simulated'] = ""; st.session_state['scan_results_df'] = pd.DataFrame(); st.toast("Lista e resultados limpos.")
+    st.query_params.clear(); st.rerun()
 
 # ==============================================================================
 # --- Abas para Organizar a Interface ---
@@ -386,7 +415,7 @@ with tab2:
                  if col_scan in profit_df_scan.columns: profit_df_scan[col_scan] = profit_df_scan[col_scan].map('{:.2f}%'.format)
             st.session_state['scan_results_df'] = profit_df_scan
             st.success(f"Scan concluído! {len(profit_df_scan)} ativos com CAGR > {min_cagr_threshold_scan}%.");
-            if skipped_count > 0: st.warning(f"{skipped_count} ativos pulados.")
+            if skipped_count > 0: st.warning(f"{skipped_count} ativos pulados devido a erros.")
             st.dataframe(profit_df_scan, use_container_width=True, height=min( (len(profit_df_scan) + 1) * 35 + 3, 600) )
             profit_tickers_scan = profit_df_scan['Ticker'].tolist(); missing_wl_scan = [t for t in profit_tickers_scan if t not in st.session_state.watchlist]
             if missing_wl_scan:
