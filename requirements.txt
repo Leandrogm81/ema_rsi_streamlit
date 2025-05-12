@@ -5,3 +5,4 @@ yfinance
 plotly
 numpy<2.0  
 setuptools
+quantstats 
